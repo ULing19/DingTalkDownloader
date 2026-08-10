@@ -1,0 +1,26 @@
+# Local credentials and downloaded content
+.goDingtalkConfig/
+video/
+cookies*.json
+链接.txt
+
+# Build and packaging output
+build/
+dist/
+ffmpeg_tmp/
+__pycache__/
+*.py[cod]
+*.log
+
+# Runtime and release binaries stay out of the source repository.
+*.exe
+*.msi
+*.zip
+*.mp4
+*.ts
+
+# Editor and OS metadata
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title>Download</title>
+  <rect width="256" height="256" rx="48" fill="#2563eb"/>
+  <path d="M128 40v111m0 0 42-42m-42 42-42-42M58 190h140" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
