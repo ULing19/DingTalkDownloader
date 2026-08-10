@@ -39,7 +39,7 @@ DEFAULT_SAVE = APP_DIR / "video"
 CONFIG_DIR = APP_DIR / ".goDingtalkConfig"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 COOKIES_FILE = CONFIG_DIR / "cookies.json"
-PROJECT_URL = "https://github.com/NAXG/DingTalkDownloader"
+PROJECT_URL = "https://github.com/ULing19/DingTalkDownloader"
 UPSTREAM_URL = "https://github.com/NAXG/GoDingtalk"
 
 

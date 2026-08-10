@@ -15,9 +15,9 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL=https://github.com/NAXG/DingTalkDownloader
-AppSupportURL=https://github.com/NAXG/DingTalkDownloader/issues
-AppUpdatesURL=https://github.com/NAXG/DingTalkDownloader/releases
+AppPublisherURL=https://github.com/ULing19/DingTalkDownloader
+AppSupportURL=https://github.com/ULing19/DingTalkDownloader/issues
+AppUpdatesURL=https://github.com/ULing19/DingTalkDownloader/releases
 Uninstallable=yes
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
@@ -57,7 +57,8 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: unchecked
+; 默认创建桌面快捷方式，用户可在安装向导中取消
+Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"
 
 [Files]
 ; 主程序与依赖（发布目录整包安装）
@@ -73,8 +74,9 @@ Source: "..\assets\download.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
 ; video 与配置目录在 [Dirs] / [Code] 创建
 
 [Dirs]
-Name: "{app}\video"; Flags: uninsalwaysuninstall
-Name: "{app}\.goDingtalkConfig"; Flags: uninsalwaysuninstall
+; 运行时目录由程序使用。仅在为空时由卸载器清理，避免误删用户视频和登录信息。
+Name: "{app}\video"
+Name: "{app}\.goDingtalkConfig"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

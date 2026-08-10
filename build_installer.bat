@@ -30,16 +30,12 @@ if "%NEED_BUILD%"=="1" (
   echo [1/4] 已找到发布目录: %RELEASE%
 )
 
-:: 同步最新使用说明到发布目录
-if exist "使用说明.txt" (
-  copy /y "使用说明.txt" "%RELEASE%\使用说明.txt" >nul
-  echo       已更新 使用说明.txt
-) else (
-  echo [WARN] 根目录缺少 使用说明.txt
-)
+:: 同步最新说明到发布目录
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\copy_release_docs.ps1" -SourceDir "." -DestinationDir "%RELEASE%"
+if errorlevel 1 echo [WARN] 发布说明复制失败
 
 :: 同步说明后重新生成绿色版压缩包
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\make_release_zip.ps1" -SourceDir "%~dp0dist\DingTalkDownloader_Release" -Destination "%~dp0dist\DingTalkDownloader_Release.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\make_release_zip.ps1" -SourceDir "%RELEASE%" -Destination "dist\DingTalkDownloader_Release.zip"
 if errorlevel 1 echo [WARN] 绿色版压缩包生成失败
 
 :: ---------- 2. 查找 Inno Setup 编译器 ----------

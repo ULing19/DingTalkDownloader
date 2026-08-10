@@ -57,15 +57,12 @@ if exist "assets\download.ico" copy /y "assets\download.ico" "%OUT%\assets\" >nu
 mkdir "%OUT%\video"
 mkdir "%OUT%\.goDingtalkConfig"
 
-if exist "使用说明.txt" (
-  copy /y "使用说明.txt" "%OUT%\使用说明.txt" >nul
-)
-if exist "LICENSE" copy /y "LICENSE" "%OUT%\LICENSE" >nul
-if exist "THIRD_PARTY_NOTICES.md" copy /y "THIRD_PARTY_NOTICES.md" "%OUT%\THIRD_PARTY_NOTICES.md" >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\copy_release_docs.ps1" -SourceDir "." -DestinationDir "%OUT%"
+if errorlevel 1 echo [WARN] 发布说明复制失败
 
 > "%OUT%\README.txt" (
   echo 钉钉回放批量下载器 1.0.1
-  echo 本项目: https://github.com/NAXG/DingTalkDownloader
+  echo 本项目: https://github.com/ULing19/DingTalkDownloader
   echo 上游引擎: https://github.com/NAXG/GoDingtalk
   echo.
   echo 1. 双击 DingTalkDownloader.exe
@@ -86,7 +83,7 @@ echo.
 echo [OK] Release folder: %OUT%
 echo 可直接分享发布目录，或运行 build_installer.bat 生成单文件安装程序。
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\make_release_zip.ps1" -SourceDir "%~dp0dist\DingTalkDownloader_Release" -Destination "%~dp0dist\DingTalkDownloader_Release.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\make_release_zip.ps1" -SourceDir "%OUT%" -Destination "dist\DingTalkDownloader_Release.zip"
 if errorlevel 1 (
   echo [WARN] 压缩包生成失败，可直接使用发布目录
 ) else (

@@ -6,7 +6,7 @@
 --------------------------------------------------------------------------------
 本工具在 GoDingtalk 命令行下载引擎之上提供图形界面，用于批量下载钉钉直播回放，
 上游项目：https://github.com/NAXG/GoDingtalk
-本项目开源地址：https://github.com/NAXG/DingTalkDownloader
+本项目开源地址：https://github.com/ULing19/DingTalkDownloader
 并自动将 TS 分片转换为 MP4。
 
 主要功能：
