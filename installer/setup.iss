@@ -24,7 +24,8 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; 输出到项目 dist 目录
 OutputDir=..\dist
-OutputBaseFilename=钉钉回放下载器_安装程序
+; 使用 ASCII 文件名，便于不同 Git 客户端和浏览器稳定下载
+OutputBaseFilename=DingTalkDownloader_Installer
 SetupIconFile=..\assets\download.ico
 Compression=lzma2/ultra64
 SolidCompression=yes

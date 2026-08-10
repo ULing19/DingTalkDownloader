@@ -51,7 +51,7 @@
 
 ### 使用安装包
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载单个文件 `钉钉回放下载器_安装程序.exe`，按向导安装即可。这个安装程序已经把 GUI、GoDingtalk 引擎和 FFmpeg 一起打包，不需要再手动拼接文件。安装程序、桌面快捷方式和主程序统一使用下载箭头图标。
+从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载单个文件 `DingTalkDownloader_Installer.exe`，按向导安装即可。这个安装程序已经把 GUI、GoDingtalk 引擎和 FFmpeg 一起打包，不需要再手动拼接文件。安装程序、桌面快捷方式和主程序统一使用下载箭头图标。
 
 首次运行：
 

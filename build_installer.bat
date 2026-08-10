@@ -100,7 +100,7 @@ if errorlevel 1 (
 :: ---------- 4. 完成 ----------
 echo [4/4] 完成
 echo.
-set "SETUP=dist\钉钉回放下载器_安装程序.exe"
+set "SETUP=dist\DingTalkDownloader_Installer.exe"
 if exist "%SETUP%" (
   echo [OK] 安装程序已生成:
   echo      %CD%\%SETUP%
@@ -110,7 +110,7 @@ if exist "%SETUP%" (
 )
 echo.
 echo 分发时请提供:
-echo   - dist\钉钉回放下载器_安装程序.exe
+echo   - dist\DingTalkDownloader_Installer.exe
 echo   （安装包内已包含 使用说明.txt）
 echo.
 explorer "dist"
