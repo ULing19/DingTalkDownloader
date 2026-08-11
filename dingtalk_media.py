@@ -42,7 +42,7 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.1.0 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.1.1 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -503,6 +503,16 @@ def _parse_private_info(info: Mapping[str, Any], kind: str) -> _ResolvedPrivate:
 
 def _classify_process_text(text: str) -> str:
     lower = text.lower()
+    # CSpace 将对象状态/权限放在业务错误码或中文消息中；先保留这类
+    # 可操作提示，避免统一折叠成“媒体解析失败”。
+    if "13023000" in lower or "文件不存在或已删除" in lower:
+        return "文件不存在或已删除"
+    if "13020005" in lower or "没有权限" in lower or "no permission" in lower:
+        return "没有访问该文件或回放的权限"
+    if "no playable media url" in lower or "没有可播放媒体" in lower:
+        return "没有可下载媒体（请确认当前钉钉账号有访问权限，且文件未删除；部分文件仅支持在线预览）"
+    if "13020000" in lower or "参数错误" in lower or "invalid parameter" in lower:
+        return "链接参数无效或钉钉文件状态无法读取"
     if "cookie" in lower or "account" in lower or "deviceid" in lower or "login" in lower:
         return "登录会话无效或已过期"
     if "unsupported" in lower or "cannot parse" in lower or "expected live-room" in lower:

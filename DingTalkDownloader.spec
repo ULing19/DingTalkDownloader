@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.1.0
+# DingTalkDownloader release version: 1.1.1
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets\\download.ico', 'assets')]
@@ -20,7 +20,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Pythonnet is present in the global build environment but is not used by
+    # this Tkinter/OpenCV application. Excluding it avoids PyInstaller scanning
+    # unrelated CLR packages and keeps the one-file build reproducible.
+    excludes=['clr', 'clr_loader', 'pythonnet'],
     noarchive=False,
     optimize=0,
 )
