@@ -57,7 +57,7 @@ function Download-File {
             Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
             Write-Host "Downloading $Url (attempt $attempt/4)"
             Invoke-WebRequest -Uri $Url -OutFile $partial -UseBasicParsing -TimeoutSec 180 -Headers @{
-                'User-Agent' = 'DingTalkDownloader-build/1.1.0'
+                'User-Agent' = 'DingTalkDownloader-build/1.1.1'
             }
             if (-not (Test-Path -LiteralPath $partial)) {
                 throw "Download did not create a file: $Url"

@@ -88,6 +88,28 @@ class DingtalkMediaTests(unittest.TestCase):
             executable.write_bytes(b"placeholder")
             self.assertEqual(media.find_mediago(root), executable)
 
+    def test_process_errors_keep_actionable_cspace_hints(self):
+        self.assertEqual(
+            media._classify_process_text("status=13023000 文件不存在或已删除"),
+            "文件不存在或已删除",
+        )
+        self.assertEqual(
+            media._classify_process_text("errorCode=13020005 你没有权限进行此操作"),
+            "没有访问该文件或回放的权限",
+        )
+        self.assertEqual(
+            media._classify_process_text("no playable media url in preview response"),
+            "没有可下载媒体（请确认当前钉钉账号有访问权限，且文件未删除；部分文件仅支持在线预览）",
+        )
+        self.assertEqual(
+            media._classify_process_text("no playable media url; reason=参数错误"),
+            "没有可下载媒体（请确认当前钉钉账号有访问权限，且文件未删除；部分文件仅支持在线预览）",
+        )
+        self.assertEqual(
+            media._classify_process_text("code=13020000 参数错误"),
+            "链接参数无效或钉钉文件状态无法读取",
+        )
+
     def test_resolve_returns_redacted_summary(self):
         payload = {
             "title": "课程标题",
