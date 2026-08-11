@@ -1,13 +1,14 @@
 ; 钉钉回放批量下载器 - Inno Setup 安装脚本
 ; 编译：ISCC.exe setup.iss
-; 源文件目录：dist\DingTalkDownloader_Release（由 build_exe.bat 生成）
+; 源文件目录：dist\DingTalkDownloader_1.1.0（由 build_exe.bat 生成）
 
 #define MyAppName "钉钉回放下载器"
 #define MyAppNameEn "DingTalkDownloader"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"
 #define MyAppEngine "GoDingtalk_v2.5.2_windows_amd64.exe"
+#define ReleaseDir "..\dist\DingTalkDownloader_1.1.0"
 
 [Setup]
 AppId={{A8F3C2E1-7B4D-4E9A-9C1F-2D6B8A0E5F31}
@@ -22,10 +23,10 @@ Uninstallable=yes
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-; 输出到项目 dist 目录
-OutputDir=..\dist
+; 安装包与绿色版压缩包归集到同一个版本目录
+OutputDir={#ReleaseDir}
 ; 使用 ASCII 文件名，便于不同 Git 客户端和浏览器稳定下载
-OutputBaseFilename=DingTalkDownloader_Installer
+OutputBaseFilename=DingTalkDownloader_1.1.0_Setup
 SetupIconFile=..\assets\download.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -45,7 +46,7 @@ ShowLanguageDialog=no
 ; 允许用户装到任意目录（绿色用户目录亦可）
 UsePreviousAppDir=yes
 DirExistsWarning=auto
-; 附带卸载时删除可选数据的确认在 [Code] 中处理
+; 卸载仅移除安装文件，运行时视频和登录配置始终保留
 CloseApplications=yes
 RestartApplications=no
 ; 较大文件（含 ffmpeg）
@@ -63,21 +64,20 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 ; 主程序与依赖（发布目录整包安装）
-Source: "..\dist\DingTalkDownloader_Release\DingTalkDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\DingTalkDownloader_Release\GoDingtalk_v2.5.2_windows_amd64.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\DingTalkDownloader_Release\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\DingTalkDownloader_Release\README.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\DingTalkDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\GoDingtalk_v2.5.2_windows_amd64.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\mediago.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\mediago_checksums.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\MEDIAGO_LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\FFMPEG_LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\FFMPEG_BUILD_INFO.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\assets\download.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
-; 预建空目录用占位（可选）
-; video 与配置目录在 [Dirs] / [Code] 创建
-
-[Dirs]
-; 运行时目录由程序使用。仅在为空时由卸载器清理，避免误删用户视频和登录信息。
-Name: "{app}\video"
-Name: "{app}\.goDingtalkConfig"
+; video 与配置目录由程序按需创建，不列入安装文件清单
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
@@ -90,36 +90,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "立即运行 {#MyAppName}"; Fla
 Filename: "{app}\使用说明.txt"; Description: "打开使用说明"; Flags: postinstall shellexec skipifsilent unchecked
 
 [UninstallDelete]
-; 卸载时清理运行时产生的空目录（用户视频与 cookies 见下方确认）
+; 仅删除空目录。用户视频、Cookies 和其他运行时文件始终不参与卸载删除。
 Type: dirifempty; Name: "{app}\video"
 Type: dirifempty; Name: "{app}\.goDingtalkConfig"
 Type: dirifempty; Name: "{app}"
-
-[Code]
-var
-  DeleteUserData: Boolean;
-
-function InitializeUninstall(): Boolean;
-begin
-  DeleteUserData := False;
-  Result := True;
-  if MsgBox('是否同时删除已下载的视频（video 文件夹）和登录配置（.goDingtalkConfig）？' + #13#10 + #13#10 +
-            '选择「是」：彻底清除' + #13#10 +
-            '选择「否」：仅卸载程序，保留视频与登录信息',
-            mbConfirmation, MB_YESNO) = IDYES then
-  begin
-    DeleteUserData := True;
-  end;
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    if DeleteUserData then
-    begin
-      DelTree(ExpandConstant('{app}\video'), True, True, True);
-      DelTree(ExpandConstant('{app}\.goDingtalkConfig'), True, True, True);
-    end;
-  end;
-end;

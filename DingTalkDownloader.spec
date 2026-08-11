@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# DingTalkDownloader release version: 1.1.0
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets\\download.ico', 'assets')]

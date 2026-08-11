@@ -1,6 +1,7 @@
 # Local credentials and downloaded content
 .goDingtalkConfig/
 video/
+outputs/
 cookies*.json
 链接.txt
 

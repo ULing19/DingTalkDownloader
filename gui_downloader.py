@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-钉钉回放批量下载器 - 图形界面
-支持：链接粘贴 / 文本文件导入 / 二维码图片导入，任务列表与实时进度。
-底层调用同目录 GoDingtalk 可执行文件。
+钉钉媒体批量下载器 - 图形界面
+支持：群直播回放、钉钉闪记、钉盘/群文件，以及文本/二维码批量导入。
+群直播优先调用 GoDingtalk；闪记和群文件由 MediaGo 后端处理。
 """
 
 from __future__ import annotations
@@ -11,10 +11,8 @@ from __future__ import annotations
 import os
 import re
 import sys
-import json
 import queue
 import shutil
-import tempfile
 import threading
 import subprocess
 from dataclasses import dataclass, field
@@ -22,6 +20,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Set
 from urllib.parse import urlparse, parse_qs
+
+from dingtalk_media import (
+    KIND_LIVE,
+    KIND_SHANJI,
+    KIND_UNKNOWN,
+    KIND_YUNPAN,
+    MediaDownloadError,
+    classify_dingtalk_url,
+    download_resolved,
+    find_mediago,
+)
 
 # ---------------------------------------------------------------------------
 # 路径与常量
@@ -52,7 +61,7 @@ def _resource_path(relative: str) -> Path:
 ICON_FILE = _resource_path("assets/download.ico")
 
 DINGTALK_URL_RE = re.compile(
-    r"https?://[^\s\"'<>]*dingtalk\.com[^\s\"'<>]*",
+    r"https?://[^\s\"'<>\[\]()]*dingtalk\.com[^\s\"'<>\[\]()]*",
     re.IGNORECASE,
 )
 PROGRESS_RE = re.compile(
@@ -62,6 +71,12 @@ PROGRESS_RE = re.compile(
 TITLE_RE = re.compile(r"标题:\s*(.+)")
 HANDLE_RE = re.compile(r"\[(\d+)\]\s*处理\s*URL:\s*(.+)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+TASK_KIND_LABELS = {
+    KIND_LIVE: "群回放",
+    KIND_SHANJI: "闪记",
+    KIND_YUNPAN: "群文件",
+    KIND_UNKNOWN: "未知",
+}
 
 
 def find_godingtalk() -> Optional[Path]:
@@ -77,19 +92,24 @@ def find_godingtalk() -> Optional[Path]:
     return None
 
 
+def find_ffmpeg() -> Optional[Path]:
+    """在程序目录和 PATH 中查找 FFmpeg。"""
+    for candidate in (APP_DIR / "ffmpeg.exe", APP_DIR / "ffmpeg"):
+        if candidate.is_file():
+            return candidate
+    for name in ("ffmpeg.exe", "ffmpeg"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
 def extract_urls_from_text(text: str) -> List[str]:
     found: List[str] = []
     seen: Set[str] = set()
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
-            continue
-        # 整行就是 URL
-        if "dingtalk.com" in line.lower() and line.startswith("http"):
-            u = line.split()[0].strip(".,;\"'")
-            if u not in seen:
-                seen.add(u)
-                found.append(u)
             continue
         for m in DINGTALK_URL_RE.finditer(line):
             u = m.group(0).rstrip(".,;\"'")
@@ -185,6 +205,14 @@ def url_short_label(url: str) -> str:
     return url[:48] + ("…" if len(url) > 48 else "")
 
 
+def compact_ui_text(value: str, limit: int) -> str:
+    """Keep long titles and signed URLs inside fixed-width task rows."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
 # ---------------------------------------------------------------------------
 # 任务模型
 # ---------------------------------------------------------------------------
@@ -192,6 +220,8 @@ def url_short_label(url: str) -> str:
 @dataclass
 class TaskItem:
     url: str
+    kind: str = KIND_UNKNOWN
+    kind_label: str = TASK_KIND_LABELS[KIND_UNKNOWN]
     status: str = "等待中"  # 等待中 / 下载中 / 转换中 / 完成 / 失败 / 已取消
     title: str = ""
     progress: float = 0.0
@@ -199,6 +229,16 @@ class TaskItem:
     total_seg: int = 0
     message: str = ""
     index: int = 0
+
+
+def make_task_item(url: str, index: int) -> TaskItem:
+    info = classify_dingtalk_url(url)
+    return TaskItem(
+        url=url,
+        kind=info.kind,
+        kind_label=TASK_KIND_LABELS.get(info.kind, info.label),
+        index=index,
+    )
 
 
 @dataclass
@@ -212,13 +252,15 @@ class AppState:
 
 
 # ---------------------------------------------------------------------------
-# 下载工作线程：逐个调用 GoDingtalk -url
+# 下载工作线程：群回放优先 GoDingtalk，其余类型调用 MediaGo 后端
 # ---------------------------------------------------------------------------
 
 class DownloadWorker(threading.Thread):
     def __init__(
         self,
-        exe: Path,
+        godingtalk: Optional[Path],
+        mediago: Optional[Path],
+        ffmpeg: Optional[Path],
         tasks: List[TaskItem],
         save_dir: Path,
         cookies: Path,
@@ -227,16 +269,35 @@ class DownloadWorker(threading.Thread):
         stop_event: threading.Event,
     ):
         super().__init__(daemon=True)
-        self.exe = exe
+        self.godingtalk = godingtalk
+        self.mediago = mediago
+        self.ffmpeg = ffmpeg
         self.tasks = tasks
         self.save_dir = save_dir
         self.cookies = cookies
         self.thread_count = thread_count
         self.event_q = event_q
         self.stop_event = stop_event
+        self._process_lock = threading.Lock()
+        self._current_process: Optional[subprocess.Popen] = None
 
     def emit(self, kind: str, **payload):
         self.event_q.put({"kind": kind, **payload})
+
+    def cancel_current(self):
+        """停止当前 GoDingtalk 进程；MediaGo/FFmpeg 由 stop_event 负责。"""
+        self.stop_event.set()
+        with self._process_lock:
+            proc = self._current_process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _set_current_process(self, proc: Optional[subprocess.Popen]):
+        with self._process_lock:
+            self._current_process = proc
 
     def run(self):
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -251,13 +312,13 @@ class DownloadWorker(threading.Thread):
             self.emit(
                 "task_update",
                 index=i,
-                status="下载中",
+                status="解析中",
                 progress=0.0,
-                message="正在解析…",
+                message=f"正在解析{task.kind_label}…",
             )
             self.emit("current", index=i)
 
-            ok, title, err = self._run_one(i, task.url)
+            ok, title, err = self._run_one(i, task)
             if self.stop_event.is_set():
                 self.emit("task_update", index=i, status="已取消", message="用户停止")
                 for j in range(i + 1, total):
@@ -285,9 +346,62 @@ class DownloadWorker(threading.Thread):
 
         self.emit("finished", done=done, total=total)
 
-    def _run_one(self, index: int, url: str):
+    def _run_one(self, index: int, task: TaskItem):
+        if task.kind == KIND_UNKNOWN:
+            return False, "", "无法识别链接类型，请确认链接完整"
+
+        if task.kind in {KIND_SHANJI, KIND_YUNPAN}:
+            return self._run_mediago(index, task)
+
+        if task.kind == KIND_LIVE:
+            if self.godingtalk is not None and self.godingtalk.is_file():
+                return self._run_godingtalk(index, task.url)
+            return self._run_mediago(index, task)
+
+        return False, "", "该钉钉链接暂不支持"
+
+    def _run_mediago(self, index: int, task: TaskItem):
+        if self.mediago is None or not self.mediago.is_file():
+            return False, "", "未找到 MediaGo 解析器"
+        if self.ffmpeg is None or not self.ffmpeg.is_file():
+            return False, "", "未找到 FFmpeg 转换工具"
+
+        def progress_callback(status: str, progress: float, message: str):
+            if self.stop_event.is_set():
+                return
+            display_status = (
+                status if status in {"解析中", "下载中", "转换中", "完成"} else "下载中"
+            )
+            self.emit(
+                "task_update",
+                index=index,
+                status=display_status,
+                progress=progress,
+                message=message,
+            )
+
+        try:
+            title, _ = download_resolved(
+                url=task.url,
+                kind=task.kind,
+                mediago=self.mediago,
+                ffmpeg=self.ffmpeg,
+                cookies_json=self.cookies if self.cookies.exists() else None,
+                save_dir=self.save_dir,
+                stop_event=self.stop_event,
+                progress_cb=progress_callback,
+            )
+            return True, title, ""
+        except MediaDownloadError as exc:
+            return False, "", str(exc)
+        except Exception:
+            return False, "", "媒体下载失败，请稍后重试"
+
+    def _run_godingtalk(self, index: int, url: str):
+        if self.godingtalk is None:
+            return False, "", "未找到 GoDingtalk 可执行文件"
         cmd = [
-            str(self.exe),
+            str(self.godingtalk),
             "-url",
             url,
             "-saveDir",
@@ -320,93 +434,94 @@ class DownloadWorker(threading.Thread):
         except Exception as exc:
             return False, title, f"启动失败: {exc}"
 
+        self._set_current_process(proc)
         assert proc.stdout is not None
         buffer = ""
         success = False
-        converting = False
+        try:
+            while True:
+                if self.stop_event.is_set():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return False, title, "已取消"
 
-        while True:
-            if self.stop_event.is_set():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                return False, title, "已取消"
-
-            chunk = proc.stdout.read(256)
-            if not chunk:
-                if proc.poll() is not None:
-                    break
-                continue
-
-            # 进度行用 \r 刷新
-            buffer += chunk
-            parts = re.split(r"[\r\n]+", buffer)
-            buffer = parts[-1]
-            lines = parts[:-1]
-
-            for raw_line in lines:
-                line = ANSI_RE.sub("", raw_line).strip()
-                if not line:
+                chunk = proc.stdout.read(256)
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
                     continue
 
-                m_title = TITLE_RE.search(line)
-                if m_title:
-                    title = m_title.group(1).strip()
-                    self.emit("task_update", index=index, title=title)
-                    continue
+                # 进度行用 \r 刷新
+                buffer += chunk
+                parts = re.split(r"[\r\n]+", buffer)
+                buffer = parts[-1]
+                lines = parts[:-1]
 
-                m_prog = PROGRESS_RE.search(line)
-                if m_prog:
-                    pct = float(m_prog.group(1))
-                    completed = int(m_prog.group(2))
-                    total_seg = int(m_prog.group(3))
-                    self.emit(
-                        "task_update",
-                        index=index,
-                        status="下载中",
-                        progress=pct,
-                        completed_seg=completed,
-                        total_seg=total_seg,
-                        message=f"分片 {completed}/{total_seg}",
-                    )
-                    continue
-
-                if "正在转换" in line or "转换ts" in line.lower():
-                    converting = True
-                    self.emit(
-                        "task_update",
-                        index=index,
-                        status="转换中",
-                        progress=100.0,
-                        message="TS → MP4 转换中…",
-                    )
-                    continue
-
-                if "下载成功" in line or "转换完成" in line:
-                    success = True
-                    continue
-
-                if any(
-                    k in line
-                    for k in ("失败", "错误", "error", "Error", "登录", "cookie", "Cookie")
-                ):
-                    # 过滤掉无害提示
-                    if "警告" in line and "配置" in line:
+                for raw_line in lines:
+                    line = ANSI_RE.sub("", raw_line).strip()
+                    if not line:
                         continue
-                    last_err = line
 
-                if line.startswith("[") and "处理 URL" in line:
-                    continue
+                    m_title = TITLE_RE.search(line)
+                    if m_title:
+                        title = m_title.group(1).strip()
+                        self.emit("task_update", index=index, title=title)
+                        continue
 
-        code = proc.wait()
-        if success or code == 0:
-            return True, title, ""
-        return False, title, last_err or f"进程退出码 {code}"
+                    m_prog = PROGRESS_RE.search(line)
+                    if m_prog:
+                        pct = float(m_prog.group(1))
+                        completed = int(m_prog.group(2))
+                        total_seg = int(m_prog.group(3))
+                        self.emit(
+                            "task_update",
+                            index=index,
+                            status="下载中",
+                            progress=pct,
+                            completed_seg=completed,
+                            total_seg=total_seg,
+                            message=f"分片 {completed}/{total_seg}",
+                        )
+                        continue
+
+                    if "正在转换" in line or "转换ts" in line.lower():
+                        self.emit(
+                            "task_update",
+                            index=index,
+                            status="转换中",
+                            progress=100.0,
+                            message="TS → MP4 转换中…",
+                        )
+                        continue
+
+                    if "下载成功" in line or "转换完成" in line:
+                        success = True
+                        continue
+
+                    if any(
+                        k in line
+                        for k in ("失败", "错误", "error", "Error", "登录", "cookie", "Cookie")
+                    ):
+                        # 过滤掉无害提示
+                        if "警告" in line and "配置" in line:
+                            continue
+                        last_err = line
+
+                    if line.startswith("[") and "处理 URL" in line:
+                        continue
+
+            code = proc.wait()
+            if success or code == 0:
+                return True, title, ""
+            return False, title, last_err or f"进程退出码 {code}"
+        finally:
+            self._set_current_process(None)
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +536,7 @@ def build_gui():
     ctk.set_default_color_theme("blue")
 
     app = ctk.CTk()
-    app.title("钉钉回放批量下载器")
+    app.title("钉钉媒体批量下载器")
     app.geometry("1080x720")
     app.minsize(900, 600)
     try:
@@ -432,6 +547,8 @@ def build_gui():
         pass
 
     exe_path = find_godingtalk()
+    mediago_path = find_mediago(APP_DIR)
+    ffmpeg_path = find_ffmpeg()
     state = AppState()
     event_q: queue.Queue = queue.Queue()
     stop_event = threading.Event()
@@ -443,15 +560,24 @@ def build_gui():
 
     title_lbl = ctk.CTkLabel(
         top,
-        text="钉钉回放批量下载",
+        text="钉钉媒体批量下载",
         font=ctk.CTkFont(size=22, weight="bold"),
     )
     title_lbl.pack(side="left")
 
+    available_engines = [
+        name
+        for name, path in (
+            ("GoDingtalk", exe_path),
+            ("MediaGo", mediago_path),
+            ("FFmpeg", ffmpeg_path),
+        )
+        if path is not None
+    ]
     exe_status = ctk.CTkLabel(
         top,
-        text=f"引擎: {exe_path.name}" if exe_path else "未找到 GoDingtalk",
-        text_color="#7ddea0" if exe_path else "#f07178",
+        text=("已找到: " + " / ".join(available_engines)) if available_engines else "未找到下载引擎",
+        text_color="#7ddea0" if (exe_path or (mediago_path and ffmpeg_path)) else "#f07178",
         font=ctk.CTkFont(size=13),
     )
     exe_status.pack(side="right")
@@ -499,7 +625,7 @@ def build_gui():
 
     hint = ctk.CTkLabel(
         left,
-        text="每行一个回放链接，或以 # 开头写注释。也可粘贴含链接的文本。",
+        text="每行一个群回放、闪记或群文件链接；也可粘贴含链接的文本。",
         text_color="gray70",
         font=ctk.CTkFont(size=12),
         wraplength=360,
@@ -548,7 +674,7 @@ def build_gui():
             all_urls.extend(extract_urls_from_text(content))
         n = add_urls(all_urls, "文本文件")
         if n == 0 and paths:
-            messagebox.showinfo("导入", "未发现新的钉钉回放链接（可能已全部存在）")
+            messagebox.showinfo("导入", "未发现新的钉钉链接（可能已全部存在）")
 
     def import_qr():
         paths = filedialog.askopenfilenames(
@@ -569,7 +695,7 @@ def build_gui():
         if n == 0:
             messagebox.showinfo(
                 "二维码",
-                "未识别到新链接。请确认图片清晰，且二维码指向钉钉回放页。",
+                "未识别到新链接。请确认图片清晰，且二维码指向支持的钉钉页面。",
             )
         else:
             messagebox.showinfo("二维码", f"成功识别并添加 {n} 条链接")
@@ -629,7 +755,16 @@ def build_gui():
             )
             idx_lbl.pack(side="left")
 
-            name = t.title or url_short_label(t.url)
+            kind_lbl = ctk.CTkLabel(
+                top_r,
+                text=t.kind_label,
+                width=58,
+                text_color="#8ab4f8" if t.kind != KIND_UNKNOWN else "#f07178",
+                font=ctk.CTkFont(size=12, weight="bold"),
+            )
+            kind_lbl.pack(side="left", padx=(2, 4))
+
+            name = compact_ui_text(t.title or url_short_label(t.url), 24)
             name_lbl = ctk.CTkLabel(
                 top_r, text=name, anchor="w", font=ctk.CTkFont(size=13)
             )
@@ -646,7 +781,7 @@ def build_gui():
 
             msg_lbl = ctk.CTkLabel(
                 fr,
-                text=t.message or t.url,
+                text=compact_ui_text(t.message or t.url, 52),
                 text_color="gray65",
                 font=ctk.CTkFont(size=11),
                 anchor="w",
@@ -656,6 +791,7 @@ def build_gui():
             row_widgets.append(
                 {
                     "frame": fr,
+                    "kind": kind_lbl,
                     "name": name_lbl,
                     "status": status_lbl,
                     "bar": bar,
@@ -669,10 +805,15 @@ def build_gui():
             return
         t = state.tasks[i]
         w = row_widgets[i]
-        name = t.title or url_short_label(t.url)
+        name = compact_ui_text(t.title or url_short_label(t.url), 24)
+        w["kind"].configure(
+            text=t.kind_label,
+            text_color="#8ab4f8" if t.kind != KIND_UNKNOWN else "#f07178",
+        )
         w["name"].configure(text=name)
         color = {
             "等待中": "gray70",
+            "解析中": "#e5c07b",
             "下载中": "#61afef",
             "转换中": "#c678dd",
             "完成": "#7ddea0",
@@ -684,7 +825,7 @@ def build_gui():
         detail = t.message
         if t.total_seg and t.status == "下载中":
             detail = f"{t.progress:.1f}%  ·  分片 {t.completed_seg}/{t.total_seg}"
-        w["msg"].configure(text=detail or t.url)
+        w["msg"].configure(text=compact_ui_text(detail or t.url, 52))
 
     # ---------- 底部控制 + 总进度 ----------
     bottom = ctk.CTkFrame(app)
@@ -750,16 +891,18 @@ def build_gui():
     def parse_to_tasks():
         urls = extract_urls_from_text(textbox.get("1.0", "end"))
         if not urls:
-            messagebox.showwarning("提示", "未找到有效的钉钉回放链接")
+            messagebox.showwarning("提示", "未找到有效的钉钉链接")
             return
-        state.tasks = [
-            TaskItem(url=u, index=i, title="", status="等待中")
-            for i, u in enumerate(urls)
-        ]
+        state.tasks = [make_task_item(u, i) for i, u in enumerate(urls)]
         rebuild_task_rows()
         overall_lbl.configure(text=f"总进度: 0 / {len(state.tasks)}")
         overall_bar.set(0)
-        log(f"已解析 {len(urls)} 条任务")
+        counts = {
+            label: sum(1 for task in state.tasks if task.kind_label == label)
+            for label in TASK_KIND_LABELS.values()
+        }
+        summary = "、".join(f"{label} {count}" for label, count in counts.items() if count)
+        log(f"已解析 {len(urls)} 条任务（{summary}）")
 
     def open_save_dir():
         d = Path(save_var.get() or DEFAULT_SAVE)
@@ -786,21 +929,57 @@ def build_gui():
         nonlocal worker
         if state.running:
             return
-        if not exe_path or not exe_path.exists():
-            messagebox.showerror("错误", "未找到 GoDingtalk 可执行文件，请放在本程序同目录")
+
+        urls = extract_urls_from_text(textbox.get("1.0", "end"))
+        if not urls:
+            messagebox.showwarning("提示", "请先输入或导入钉钉链接")
             return
+
+        tasks = [make_task_item(u, i) for i, u in enumerate(urls)]
+        unknown_count = sum(1 for task in tasks if task.kind == KIND_UNKNOWN)
+        if unknown_count:
+            messagebox.showerror(
+                "不支持的链接",
+                f"有 {unknown_count} 条链接无法识别。\n"
+                "目前支持群回放、钉钉闪记和钉盘/群文件链接。",
+            )
+            state.tasks = tasks
+            rebuild_task_rows()
+            return
+
+        has_live = any(task.kind == KIND_LIVE for task in tasks)
+        has_media_tasks = any(task.kind in {KIND_SHANJI, KIND_YUNPAN} for task in tasks)
+        godingtalk_ready = bool(exe_path and exe_path.is_file())
+        mediago_ready = bool(mediago_path and mediago_path.is_file())
+        ffmpeg_ready = bool(ffmpeg_path and ffmpeg_path.is_file())
+        missing = []
+        if has_media_tasks:
+            if not mediago_ready:
+                missing.append("MediaGo（闪记/群文件解析）")
+            if not ffmpeg_ready:
+                missing.append("FFmpeg（媒体下载与合并）")
+        if has_live and not godingtalk_ready and not (mediago_ready and ffmpeg_ready):
+            missing.append("GoDingtalk，或 MediaGo + FFmpeg（群回放）")
+        if missing:
+            messagebox.showerror(
+                "缺少下载引擎",
+                "当前任务缺少以下组件：\n\n" + "\n".join(f"• {item}" for item in missing),
+            )
+            return
+
         if not COOKIES_FILE.exists():
+            if not godingtalk_ready:
+                messagebox.showerror(
+                    "需要登录",
+                    f"未找到登录会话文件：\n{COOKIES_FILE}\n\n请先通过 GoDingtalk 登录。",
+                )
+                return
             if not messagebox.askyesno(
                 "需要登录",
                 "未找到 cookies.json，是否先执行登录？\n（登录成功后再点开始下载）",
             ):
                 return
             do_login()
-            return
-
-        urls = extract_urls_from_text(textbox.get("1.0", "end"))
-        if not urls:
-            messagebox.showwarning("提示", "请先输入或导入回放链接")
             return
 
         try:
@@ -812,9 +991,7 @@ def build_gui():
         save_dir = Path(save_var.get().strip() or str(DEFAULT_SAVE))
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        state.tasks = [
-            TaskItem(url=u, index=i, status="等待中") for i, u in enumerate(urls)
-        ]
+        state.tasks = tasks
         state.running = True
         state.stop_flag = False
         state.overall_done = 0
@@ -830,7 +1007,9 @@ def build_gui():
         log(f"开始下载 {len(urls)} 个任务 → {save_dir}")
 
         worker = DownloadWorker(
-            exe=exe_path,
+            godingtalk=exe_path,
+            mediago=mediago_path,
+            ffmpeg=ffmpeg_path,
             tasks=list(state.tasks),
             save_dir=save_dir,
             cookies=COOKIES_FILE,
@@ -844,7 +1023,9 @@ def build_gui():
         if not state.running:
             return
         stop_event.set()
-        log("正在停止…（当前任务结束后生效）")
+        if worker is not None:
+            worker.cancel_current()
+        log("正在停止当前任务并取消后续任务…")
         stop_btn.configure(state="disabled")
 
     def poll_events():
@@ -876,7 +1057,10 @@ def build_gui():
                     i = ev.get("index", -1)
                     if 0 <= i < len(state.tasks):
                         t = state.tasks[i]
-                        log(f"[{i+1}/{len(state.tasks)}] 开始: {t.title or url_short_label(t.url)}")
+                        log(
+                            f"[{i+1}/{len(state.tasks)}] {t.kind_label}: "
+                            f"{t.title or url_short_label(t.url)}"
+                        )
                 elif kind == "finished":
                     state.running = False
                     start_btn.configure(state="normal")
@@ -888,7 +1072,9 @@ def build_gui():
                     if total:
                         overall_bar.set(done / total)
                     log(f"全部结束：成功 {done} / {total}")
-                    if done == total and total > 0:
+                    if stop_event.is_set():
+                        log(f"任务已停止：停止前成功 {done} / {total}")
+                    elif done == total and total > 0:
                         messagebox.showinfo("完成", f"全部 {total} 个任务已下载完成")
                     elif total > 0:
                         messagebox.showwarning(
@@ -907,9 +1093,13 @@ def build_gui():
     repo_btn.configure(command=open_project_link)
 
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
-    log("就绪。可粘贴链接、导入文本或二维码图片。")
+    log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
     if not exe_path:
-        log("警告：未在程序目录找到 GoDingtalk 可执行文件。")
+        log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")
+    if not mediago_path:
+        log("警告：未找到 MediaGo，闪记和群文件任务暂不可用。")
+    if not ffmpeg_path:
+        log("警告：未找到 FFmpeg，MediaGo 媒体任务暂不可用。")
     if COOKIES_FILE.exists():
         log(f"已检测到 Cookies: {COOKIES_FILE}")
     else:
