@@ -24,7 +24,12 @@ from dingtalk_replay_extractor import (
 
 
 APP_TITLE = "钉钉回放链接一键获取"
-DEFAULT_CUSTOMER_ROOT = Path(r"G:\客户资料")
+DEFAULT_CUSTOMER_ROOT = Path(
+    os.environ.get(
+        "DINGTALK_REPLAY_ROOT",
+        str(Path.home() / "Videos" / "DingTalkReplay"),
+    )
+)
 LINK_FILE_NAME = "链接集.txt"
 UUID_RE = re.compile(
     r"[?&]liveUuid=("
@@ -85,6 +90,47 @@ def save_settings(settings: Dict[str, object], path: Optional[Path] = None) -> N
                 pass
 
 
+def _existing_absolute_directory(value: object) -> Optional[Path]:
+    if isinstance(value, Path):
+        candidate = value
+    elif isinstance(value, str) and value.strip():
+        candidate = Path(value.strip()).expanduser()
+    else:
+        return None
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def resolve_customer_root(
+    settings: Dict[str, object],
+    fallback: Path = DEFAULT_CUSTOMER_ROOT,
+) -> Optional[Path]:
+    """Return a configured existing root, or the portable default when present."""
+    configured = _existing_absolute_directory(settings.get("customer_root"))
+    if configured is not None:
+        return configured
+    return _existing_absolute_directory(fallback)
+
+
+def remember_customer_root(
+    root: Path,
+    settings: Dict[str, object],
+    settings_path: Optional[Path] = None,
+) -> Path:
+    """Persist a user-selected existing root and return its resolved path."""
+    resolved = _existing_absolute_directory(root)
+    if resolved is None:
+        raise ReplayExtractionError("保存根目录必须是已存在的绝对路径")
+    settings["customer_root"] = str(resolved)
+    save_settings(settings, settings_path)
+    return resolved
+
+
 def _valid_group_folder_name(name: Optional[str]) -> Optional[str]:
     if not name:
         return None
@@ -115,7 +161,7 @@ def _is_path_within(path: Path, root: Path) -> bool:
 def discover_destination(
     result: ReplayExtractionResult,
     settings: Dict[str, object],
-    customer_root: Path = DEFAULT_CUSTOMER_ROOT,
+    customer_root: Optional[Path] = DEFAULT_CUSTOMER_ROOT,
 ) -> Optional[Path]:
     destinations = settings.get("destinations")
     if isinstance(destinations, dict):
@@ -128,17 +174,20 @@ def discover_destination(
                     candidate.is_absolute()
                     and candidate.name == LINK_FILE_NAME
                     and candidate.parent.is_dir()
-                    and _is_path_within(candidate, customer_root)
+                    and (
+                        customer_root is None
+                        or _is_path_within(candidate, customer_root)
+                    )
                 ):
                     return candidate
 
     safe_name = _valid_group_folder_name(result.group_name)
-    if safe_name and customer_root.is_dir():
+    if customer_root is not None and safe_name and customer_root.is_dir():
         exact = customer_root / safe_name / LINK_FILE_NAME
         if exact.parent.is_dir():
             return exact
 
-    if not customer_root.is_dir():
+    if customer_root is None or not customer_root.is_dir():
         return None
     current_uuids = {item.live_uuid.lower() for item in result.links}
     scored = []
@@ -202,6 +251,7 @@ class CollectorApp:
         style.configure("Collector.Horizontal.TProgressbar", thickness=5)
 
         self.settings = load_settings()
+        self.customer_root = resolve_customer_root(self.settings)
         self.result: Optional[ReplayExtractionResult] = None
         self.destination: Optional[Path] = None
         self.running = False
@@ -306,10 +356,35 @@ class CollectorApp:
         from tkinter import filedialog
 
         self.result = result
-        destination = discover_destination(result, self.settings)
+        customer_root = self.customer_root or resolve_customer_root(self.settings)
+        if customer_root is None:
+            selected_root = filedialog.askdirectory(
+                parent=self.root,
+                title="选择保存根目录（包含群文件夹的上级目录）",
+                initialdir=str(Path.home()),
+                mustexist=True,
+            )
+            if not selected_root:
+                self.running = False
+                self.progress.stop()
+                self.retry_button.configure(state="normal")
+                self.status_label.configure(text="已取消选择保存根目录。", fg="#374151")
+                self.detail_label.configure(text="没有写入或覆盖任何链接文件。")
+                return
+            try:
+                customer_root = remember_customer_root(
+                    Path(selected_root),
+                    self.settings,
+                )
+            except Exception as exc:
+                self._scan_failed(exc)
+                return
+            self.customer_root = customer_root
+
+        destination = discover_destination(result, self.settings, customer_root)
         if destination is None:
             label = result.group_name or f"群 {result.cid}"
-            initial = str(DEFAULT_CUSTOMER_ROOT if DEFAULT_CUSTOMER_ROOT.is_dir() else Path.home())
+            initial = str(customer_root)
             selected = filedialog.askdirectory(
                 parent=self.root,
                 title=f"选择“{label}”的保存文件夹",
@@ -324,9 +399,9 @@ class CollectorApp:
                 self.detail_label.configure(text="没有写入或覆盖任何链接文件。")
                 return
             destination = Path(selected) / LINK_FILE_NAME
-            if not _is_path_within(destination, DEFAULT_CUSTOMER_ROOT):
+            if not _is_path_within(destination, customer_root):
                 self._scan_failed(
-                    ReplayExtractionError(f"保存位置必须位于 {DEFAULT_CUSTOMER_ROOT}")
+                    ReplayExtractionError("保存位置必须位于已选择的保存根目录")
                 )
                 return
         try:
@@ -341,7 +416,7 @@ class CollectorApp:
                 result,
                 destination,
                 self.settings,
-                allowed_root=DEFAULT_CUSTOMER_ROOT,
+                allowed_root=customer_root,
             )
         except Exception:
             settings_warning = "；保存位置记忆失败，下次可能需要重新选择"
@@ -364,10 +439,29 @@ class CollectorApp:
 
         if self.result is None:
             return
+        customer_root = self.customer_root or resolve_customer_root(self.settings)
+        if customer_root is None:
+            selected_root = filedialog.askdirectory(
+                parent=self.root,
+                title="选择保存根目录（包含群文件夹的上级目录）",
+                initialdir=str(Path.home()),
+                mustexist=True,
+            )
+            if not selected_root:
+                return
+            try:
+                customer_root = remember_customer_root(
+                    Path(selected_root),
+                    self.settings,
+                )
+            except Exception as exc:
+                self._scan_failed(exc)
+                return
+            self.customer_root = customer_root
         initial = (
             str(self.destination.parent)
             if self.destination is not None and self.destination.parent.is_dir()
-            else str(DEFAULT_CUSTOMER_ROOT if DEFAULT_CUSTOMER_ROOT.is_dir() else Path.home())
+            else str(customer_root)
         )
         selected = filedialog.askdirectory(
             parent=self.root,
@@ -378,9 +472,9 @@ class CollectorApp:
         if not selected:
             return
         destination = Path(selected) / LINK_FILE_NAME
-        if not _is_path_within(destination, DEFAULT_CUSTOMER_ROOT):
+        if not _is_path_within(destination, customer_root):
             self.status_label.configure(
-                text=f"保存位置必须位于 {DEFAULT_CUSTOMER_ROOT}",
+                text="保存位置必须位于已选择的保存根目录",
                 fg="#b42318",
             )
             return
@@ -395,7 +489,7 @@ class CollectorApp:
                 self.result,
                 destination,
                 self.settings,
-                allowed_root=DEFAULT_CUSTOMER_ROOT,
+                allowed_root=customer_root,
             )
         except Exception:
             settings_warning = "；保存位置记忆失败，下次可能需要重新选择"
@@ -423,6 +517,8 @@ __all__ = [
     "discover_destination",
     "load_settings",
     "main",
+    "remember_customer_root",
     "remember_destination",
+    "resolve_customer_root",
     "save_settings",
 ]

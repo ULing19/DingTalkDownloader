@@ -9,7 +9,9 @@ from replay_link_collector import (
     LINK_FILE_NAME,
     discover_destination,
     load_settings,
+    remember_customer_root,
     remember_destination,
+    resolve_customer_root,
 )
 
 
@@ -87,6 +89,47 @@ class ReplayLinkCollectorTests(unittest.TestCase):
             entry = loaded["destinations"]["12345678901"]
             self.assertEqual(entry["name"], "目标群")
             self.assertEqual(Path(entry["path"]), (output_dir / LINK_FILE_NAME).resolve())
+
+    def test_customer_root_round_trip(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            settings_path = root_path / "settings.json"
+            settings = {"destinations": {}}
+            saved = remember_customer_root(root_path, settings, settings_path)
+            loaded = load_settings(settings_path)
+            self.assertEqual(saved, root_path.resolve())
+            self.assertEqual(resolve_customer_root(loaded), root_path.resolve())
+
+    def test_missing_customer_root_is_not_accepted(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = Path(root) / "not-created"
+            self.assertIsNone(
+                resolve_customer_root(
+                    {"customer_root": str(missing)},
+                    fallback=missing,
+                )
+            )
+
+    def test_custom_root_allows_saved_destination(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
+            selected_root = Path(root)
+            group_folder = Path(other) / "目标群"
+            group_folder.mkdir()
+            settings = {
+                "destinations": {
+                    "12345678901": {
+                        "name": "目标群",
+                        "path": str(group_folder / LINK_FILE_NAME),
+                    }
+                }
+            }
+            self.assertIsNone(
+                discover_destination(self.make_result(), settings, selected_root)
+            )
+            self.assertEqual(
+                discover_destination(self.make_result(), settings, None),
+                group_folder / LINK_FILE_NAME,
+            )
 
     def test_invalid_group_name_never_escapes_customer_root(self):
         with tempfile.TemporaryDirectory() as root:
