@@ -41,11 +41,12 @@ from dingtalk_replay_extractor import (
     extract_current_group_replays,
 )
 from replay_link_collector import (
-    DEFAULT_CUSTOMER_ROOT,
     LINK_FILE_NAME,
     discover_destination,
     load_settings,
+    remember_customer_root,
     remember_destination,
+    resolve_customer_root,
 )
 
 # ---------------------------------------------------------------------------
@@ -1063,33 +1064,43 @@ def build_gui():
     def _collector_succeeded(result: ReplayExtractionResult) -> None:
         nonlocal collector_running
         try:
-            if not DEFAULT_CUSTOMER_ROOT.is_dir():
-                raise ReplayExtractionError(
-                    f"未找到保存根目录：{DEFAULT_CUSTOMER_ROOT}\n"
-                    "请确认客户资料磁盘已连接后重试。"
-                )
-
             settings = load_settings(COLLECTOR_SETTINGS)
+            customer_root = resolve_customer_root(settings)
+            if customer_root is None:
+                selected_root = filedialog.askdirectory(
+                    parent=app,
+                    title="选择保存根目录（包含群文件夹的上级目录）",
+                    initialdir=str(Path.home()),
+                    mustexist=True,
+                )
+                if not selected_root:
+                    log("已取消选择保存根目录，没有覆盖任何链接文件。")
+                    return
+                customer_root = remember_customer_root(
+                    Path(selected_root),
+                    settings,
+                    settings_path=COLLECTOR_SETTINGS,
+                )
             destination = discover_destination(
                 result,
                 settings,
-                DEFAULT_CUSTOMER_ROOT,
+                customer_root,
             )
             if destination is None:
                 label = result.group_name or f"群 {result.cid}"
                 selected = filedialog.askdirectory(
                     parent=app,
                     title=f"选择“{label}”的保存文件夹",
-                    initialdir=str(DEFAULT_CUSTOMER_ROOT),
+                    initialdir=str(customer_root),
                     mustexist=True,
                 )
                 if not selected:
                     log("已取消选择保存位置，没有覆盖任何链接文件。")
                     return
                 destination = Path(selected) / LINK_FILE_NAME
-                if not _path_within(destination, DEFAULT_CUSTOMER_ROOT):
+                if not _path_within(destination, customer_root):
                     raise ReplayExtractionError(
-                        f"保存位置必须位于 {DEFAULT_CUSTOMER_ROOT}"
+                        "保存位置必须位于已选择的保存根目录"
                     )
 
             atomic_write_links(destination, result.urls)
@@ -1100,7 +1111,7 @@ def build_gui():
                     destination,
                     settings,
                     settings_path=COLLECTOR_SETTINGS,
-                    allowed_root=DEFAULT_CUSTOMER_ROOT,
+                    allowed_root=customer_root,
                 )
             except Exception:
                 remember_warning = "；保存位置记忆失败，下次可能需要重新选择"
@@ -1129,14 +1140,6 @@ def build_gui():
             return
         if state.running:
             messagebox.showwarning("任务进行中", "请先停止当前下载任务，再获取新的群回放链接。")
-            return
-        if not DEFAULT_CUSTOMER_ROOT.is_dir():
-            _collector_failed(
-                ReplayExtractionError(
-                    f"未找到保存根目录：{DEFAULT_CUSTOMER_ROOT}\n"
-                    "请确认客户资料磁盘已连接后重试。"
-                )
-            )
             return
 
         collector_running = True
@@ -1344,7 +1347,10 @@ def build_gui():
 
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
     log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
-    log(f"当前群链接获取后会保存到 {DEFAULT_CUSTOMER_ROOT} 下对应群目录的 {LINK_FILE_NAME}。")
+    log(
+        f"当前群链接获取后会保存到已配置保存根目录下对应群目录的 {LINK_FILE_NAME}；"
+        "首次使用时会提示选择保存根目录。"
+    )
     if not exe_path:
         log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")
     if not mediago_path:

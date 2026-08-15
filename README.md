@@ -82,8 +82,9 @@
 1. 在钉钉打开目标群的“直播广场”，切换到“全部”并清空搜索条件。
 2. 如果列表使用分页或懒加载，滚动到列表底部，等待最后一页完成。
 3. 回到下载器，点击输入区下方的“获取当前群回放链接”。
-4. 首次识别某个群时，选择一个本机已有的群资料文件夹；之后程序会按群 ID 记忆位置。
-5. 链接会加入输入框和任务列表，并写入所选群资料文件夹下的 `链接集.txt`。
+4. 首次使用时选择一个任意可写的保存根目录（建议选择包含多个群文件夹的上级目录）。
+5. 首次识别某个群时，再选择对应群资料文件夹；之后程序会按群 ID 记忆位置。
+6. 链接会加入输入框和任务列表，并写入所选群资料文件夹下的 `链接集.txt`。
 
 采集器只读钉钉 CEF 日志和当前直播广场渲染进程的可读信息，不点击群聊、不发送消息、不调用钉钉 RPC。页面未稳定、群身份无法确认或保存目录不可访问时，不会覆盖原有链接文件。
 
@@ -91,13 +92,13 @@
 
 ### 安装版（推荐）
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.2.0_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.2.1_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留 `video\` 和 `.goDingtalkConfig\`，以免误删下载结果与登录会话；确认不再需要时再手动删除这两个目录。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.2.0_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.2.1_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -192,7 +193,7 @@ video\                         # 默认输出目录（本地数据）
 
 **提示“未找到下载引擎”**：确认主程序、GoDingtalk、MediaGo 和 FFmpeg 在同一目录，并检查安全软件是否隔离了其中的文件。
 
-**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 1.2.0，并粘贴完整原始链接。
+**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 1.2.1，并粘贴完整原始链接。
 
 **闪记提示缺少 `account/access_token` 或 `deviceid`**：登录会话不完整或已过期。点击“重新登录”，并确认同一账号能在浏览器打开闪记页面。
 
@@ -204,11 +205,11 @@ video\                         # 默认输出目录（本地数据）
 
 **二维码识别失败**：使用清晰原图并保留二维码四周空白；也可以直接复制二维码打开后的完整 URL。
 
-**“获取当前群回放链接”失败**：确认钉钉停留在目标群“直播广场”，已切换“全部”并滚动到末页；确认所选保存文件夹仍存在且可写。列表仍在变化时等待几秒后重试，失败不会覆盖旧的 `链接集.txt`。
+**“获取当前群回放链接”失败**：确认钉钉停留在目标群“直播广场”，已切换“全部”并滚动到末页；首次使用时按提示选择任意可写的保存根目录和群文件夹。列表仍在变化时等待几秒后重试，失败不会覆盖旧的 `链接集.txt`。
 
 ## 上游引用与许可证
 
-本项目的 GUI 代码通过同目录引擎完成下载，并引用 [NAXG/GoDingtalk](https://github.com/NAXG/GoDingtalk)。1.2.0 还集成了 [Sophomoresty/mediago v0.3.0](https://github.com/Sophomoresty/mediago)，用于闪记和 CSpace/钉盘媒体解析；FFmpeg 用于分片合并和容器转换。
+本项目的 GUI 代码通过同目录引擎完成下载，并引用 [NAXG/GoDingtalk](https://github.com/NAXG/GoDingtalk)。1.2.1 还集成了 [Sophomoresty/mediago v0.3.0](https://github.com/Sophomoresty/mediago)，用于闪记和 CSpace/钉盘媒体解析；FFmpeg 用于分片合并和容器转换。
 
 GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请阅读 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，再进行再分发。MediaGo 仓库标注 The Unlicense，但这不等同于钉钉官方授权，也不能自动解决第三方代码、平台接口或内容版权问题。
 
@@ -221,4 +222,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.2.0`。
+当前 GUI/安装包版本：`1.2.1`。
