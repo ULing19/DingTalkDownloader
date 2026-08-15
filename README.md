@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases">下载 1.1.1</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases">下载 1.1.2</a>
   ·
   <a href="https://github.com/NAXG/GoDingtalk">GoDingtalk 上游引擎</a>
   ·
@@ -33,8 +33,8 @@
 | 链接类型 | 示例格式 | 处理方式 | 版本说明 |
 | --- | --- | --- | --- |
 | 群直播回放 | `https://n.dingtalk.com/dingding/live-room/index.html?roomId=...&liveUuid=...` | 解析回放媒体并下载/合并 | 稳定入口 |
-| 钉钉闪记 | `https://shanji.dingtalk.com/app/transcribes/<转写ID>` | 读取闪记记录中的可播放媒体 | 1.1.1 适配，需登录 |
-| 群文件/钉盘文件 | `https://qr.dingtalk.com/page/yunpan?route=previewDentry&spaceId=<空间ID>&fileId=<文件ID>&type=file` | 读取 CSpace 元数据；视频走播放流，普通文件走直接下载地址 | 1.1.1 适配，需文件权限 |
+| 钉钉闪记 | `https://shanji.dingtalk.com/app/transcribes/<转写ID>` | 读取闪记记录中的可播放媒体 | 1.1.2 适配，需登录 |
+| 群文件/钉盘文件 | `https://qr.dingtalk.com/page/yunpan?route=previewDentry&spaceId=<空间ID>&fileId=<文件ID>&type=file` | 读取 CSpace 元数据；视频走播放流，普通文件走直接下载地址 | 1.1.2 适配，需文件权限 |
 
 闪记链接中的最后一段是记录 ID；群文件链接中的 `spaceId` 和 `fileId` 是云盘对象标识。不要把它们改写成 `roomId` 或 `liveUuid`，三类对象的后端接口不同。
 
@@ -62,7 +62,7 @@
 从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载：
 
 ```text
-DingTalkDownloader_1.1.1_Setup.exe
+DingTalkDownloader_1.1.2_Setup.exe
 ```
 
 安装向导会把 GUI、GoDingtalk、MediaGo、FFmpeg 和说明文件放在同一应用目录，并创建开始菜单项。向导默认勾选“创建桌面快捷方式”，可以取消。安装后可从“设置 → 应用”、开始菜单中的卸载项或安装目录的卸载程序移除软件。
@@ -74,7 +74,7 @@ DingTalkDownloader_1.1.1_Setup.exe
 同一 Release 目录提供：
 
 ```text
-DingTalkDownloader_1.1.1_Portable.zip
+DingTalkDownloader_1.1.2_Portable.zip
 ```
 
 解压到任意位置即可使用，不写入系统安装项。请保持以下文件在同一目录：
@@ -129,7 +129,7 @@ build_exe.bat
 build_installer.bat
 ```
 
-构建结果位于 `dist\DingTalkDownloader_1.1.1\`，包含安装版所需文件和绿色版压缩包。应用、安装程序和桌面快捷方式共用 `assets\download.ico` 下载箭头图标。
+构建结果位于 `dist\DingTalkDownloader_1.1.2\`，包含安装版所需文件和绿色版压缩包。应用、安装程序和桌面快捷方式共用 `assets\download.ico` 下载箭头图标。
 
 ## 目录结构
 
@@ -151,23 +151,23 @@ video\                         # 默认输出目录
 
 **提示“未找到下载引擎”**：确认 `DingTalkDownloader.exe`、`GoDingtalk_v2.5.2_windows_amd64.exe`、`mediago.exe` 和 `ffmpeg.exe` 没有被拆到不同目录，也没有被杀毒软件隔离。
 
-**提示“缺少 roomId 或 liveUuid”**：这是把普通闪记或群文件链接交给了旧版直播解析器。升级到 1.1.1，并保留完整 URL；不要手工拼接参数。
+**提示“缺少 roomId 或 liveUuid”**：这是把普通闪记或群文件链接交给了旧版直播解析器。升级到 1.1.2，并保留完整 URL；不要手工拼接参数。
 
 **闪记提示缺少 `account/access_token` 或 `deviceid`**：当前登录会话不完整或已失效。点击“重新登录”，并确认同一账号能在浏览器打开闪记页面。
 
-**群文件提示“不支持 URL”**：确认使用的是 1.1.1 及以上版本，并保留 `route=previewDentry`、`spaceId`、`fileId` 和 `type=file` 参数。旧版 GoDingtalk/MediaGo 可能只认识直播 URL。
+**群文件提示“不支持 URL”**：确认使用的是 1.1.2 及以上版本，并保留 `route=previewDentry`、`spaceId`、`fileId` 和 `type=file` 参数。旧版 GoDingtalk/MediaGo 可能只认识直播 URL。
 
 **群文件提示“没有可下载媒体”**：先在钉钉客户端用同一账号打开原链接。若客户端也提示无权访问，应由文件所有者或群管理员授权；程序不会绕过权限。能预览但仍失败时，再检查视频是否仍在转码，或普通文件是否确实提供直接下载地址。只有预览地址、没有直接下载地址的条目仍可能无法保存。
 
 **只有 TS、没有 MP4**：确认同目录有 `ffmpeg.exe`，再重试失败任务；不要在下载过程中移动程序目录。
 
-**二维码识别失败**：使用原始清晰图片，保留二维码四周空白；也可以直接复制二维码打开后的完整 URL。
+**二维码识别失败**：1.1.2 会先尝试 ZBar，再用 OpenCV 放大、补白边和灰度/反色识别，适合钉钉卡片中的小二维码或中央带播放按钮的二维码。仍失败时请使用原始清晰图片并保留二维码四周空白，也可以直接复制二维码打开后的完整 URL。
 
 ## 上游引用、许可与来源说明
 
 本项目的 GUI 代码通过同目录引擎完成下载，并引用：[NAXG/GoDingtalk](https://github.com/NAXG/GoDingtalk)。GoDingtalk 的许可、版权和发行条件以其仓库当前声明为准。
 
-1.1.1 还集成了 [Sophomoresty/mediago v0.3.0](https://github.com/Sophomoresty/mediago)，其仓库标注 **The Unlicense**，用于闪记和 CSpace/钉盘媒体解析。该项目钉钉实现的源码注释提到由反编译的 `Dingtalk_Live_Client.pyc` 移植；Unlicense 只涉及其作者能够授予的权利，不能自动解决第三方代码、平台协议或接口使用的权利问题。本项目仅按公开 Release 做兼容集成，不声称得到钉钉官方授权，也不保证上游接口长期稳定。
+1.1.2 还集成了 [Sophomoresty/mediago v0.3.0](https://github.com/Sophomoresty/mediago)，其仓库标注 **The Unlicense**，用于闪记和 CSpace/钉盘媒体解析。该项目钉钉实现的源码注释提到由反编译的 `Dingtalk_Live_Client.pyc` 移植；Unlicense 只涉及其作者能够授予的权利，不能自动解决第三方代码、平台接口或数据内容的权利问题。本项目仅按公开 Release 做兼容集成，不声称得到钉钉官方授权，也不保证上游接口长期稳定。
 
 FFmpeg 的许可取决于发布构建配置，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。再分发时请保留各组件的许可证和来源说明。
 
@@ -182,4 +182,4 @@ FFmpeg 的许可取决于发布构建配置，详见 [THIRD_PARTY_NOTICES.md](TH
 
 本项目自有 GUI 代码以 MIT License 发布，详见 [LICENSE](LICENSE)。GoDingtalk、MediaGo、FFmpeg 及其他组件分别遵循各自许可；完整归属和注意事项见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-当前 GUI/安装包版本：`1.1.1`。
+当前 GUI/安装包版本：`1.1.2`。

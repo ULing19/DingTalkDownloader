@@ -12,12 +12,30 @@ $names = @(
     "DingTalkDownloader_${Version}_Setup.exe",
     "DingTalkDownloader_${Version}_Portable.zip"
 )
+
+function Get-Sha256 {
+    param([string]$Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 $lines = foreach ($name in $names) {
     $path = Join-Path $release $name
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Release asset is missing: $path"
     }
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256 -Path $path
     "$hash  $name"
 }
 

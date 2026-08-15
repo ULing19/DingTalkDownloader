@@ -1,6 +1,6 @@
 # 第三方组件与来源说明
 
-本文件记录 1.1.1 发布包中随软件使用或再分发的主要组件。各组件仍由其原作者负责维护；本项目不把第三方组件的许可扩大为钉钉官方授权。
+本文件记录 1.1.2 发布包中随软件使用或再分发的主要组件。各组件仍由其原作者负责维护；本项目不把第三方组件的许可扩大为钉钉官方授权。
 
 ## GoDingtalk
 
@@ -37,6 +37,9 @@
 | CustomTkinter | 图形控件和主题 | 以 PyPI/上游仓库当前许可证为准 |
 | Pillow | 图片读取和二维码预处理 | 以 PyPI/上游仓库当前许可证为准 |
 | opencv-python-headless | 二维码识别 | 以 PyPI/上游仓库当前许可证及其二进制依赖说明为准 |
+| pyzbar / ZBar | 遮挡二维码的备用识别 | pyzbar 0.1.9 按 MIT 发布；随 Windows wheel 提供的 ZBar 动态库按 LGPL-2.1 发布 |
+
+发布包额外附带 `PYZBAR-LICENSE.txt`（pyzbar MIT）、`ZBAR-LICENSE.txt`（ZBar LGPL-2.1）和 `LIBICONV-NOTICE.txt`（随 pyzbar Windows wheel 一起分发的 libiconv 动态库来源与许可证说明）。ZBar 和 libiconv 仅作为二维码识别依赖，不属于钉钉官方 SDK。动态库保持独立文件随包分发，便于按 LGPL 条款替换或重新链接。
 
 安装或再分发源码环境时，请保留各包的版权和许可证文件，不要把本项目 MIT 许可证套用到这些依赖。
 
