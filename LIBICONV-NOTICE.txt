@@ -1,0 +1,14 @@
+libiconv.dll 来源与许可证说明
+
+本发布包中的 libiconv.dll 来自 pyzbar 0.1.9 的 Windows wheel，用于支持
+pyzbar 调用 ZBar。该动态库不是本项目的自有代码。libiconv 由 GNU 项目维护，
+通常按 GNU LGPL 发布；具体版权、版本和许可证义务以该动态库对应的上游
+发行说明为准。
+
+来源：
+https://pypi.org/project/pyzbar/0.1.9/
+https://www.gnu.org/software/libiconv/
+
+发布时保持 libiconv.dll 为可替换的独立动态库，并同时提供本文件、
+PYZBAR-LICENSE.txt 和 ZBAR-LICENSE.txt。需要完整源码或对应构建信息时，
+可从上述上游地址获取；本项目不对该第三方动态库作额外授权或担保。

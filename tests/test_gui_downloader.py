@@ -72,6 +72,55 @@ class GuiDownloaderTests(unittest.TestCase):
         self.assertEqual(len(rendered), 24)
         self.assertTrue(rendered.endswith("…"))
 
+    def test_decode_qr_images_recovers_small_qr_without_quiet_zone(self):
+        """Small card screenshots need a white border before OpenCV detection."""
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV is not installed")
+
+        if not hasattr(cv2, "QRCodeEncoder_create"):
+            self.skipTest("OpenCV QR encoder is not available")
+
+        url = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=sample&liveUuid=00000000-0000-0000-0000-000000000000"
+        )
+        params = cv2.QRCodeEncoder_Params()
+        params.correction_level = 3
+        qr = cv2.QRCodeEncoder_create(params).encode(url)
+        ys, xs = np.where(qr < 128)
+        qr = qr[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+
+        # Deliberately omit the standard quiet zone and keep modules tiny,
+        # matching the failure mode of the supplied DingTalk card screenshot.
+        canvas = np.full((220, 180, 3), 255, dtype=np.uint8)
+        rendered = cv2.resize(qr, None, fx=1, fy=1, interpolation=cv2.INTER_NEAREST)
+        height, width = rendered.shape[:2]
+        canvas[20 : 20 + height, 10 : 10 + width] = cv2.cvtColor(
+            rendered, cv2.COLOR_GRAY2BGR
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            image_path = Path(root) / "small-card.png"
+            ok, encoded = cv2.imencode(".png", canvas)
+            self.assertTrue(ok)
+            encoded.tofile(str(image_path))
+            self.assertEqual(gui.decode_qr_images([image_path]), [url])
+
+    def test_qr_import_uses_zbar_fallback_for_overlayed_code(self):
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "overlayed-qr.png"
+            cv2.imwrite(str(path), np.zeros((40, 40, 3), dtype=np.uint8))
+            expected = "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u"
+            with mock.patch.object(gui, "_try_decode_pyzbar", return_value=[expected]) as decode:
+                self.assertEqual(gui.decode_qr_images([path]), [expected])
+            decode.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()

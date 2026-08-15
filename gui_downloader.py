@@ -137,8 +137,31 @@ def _try_decode_qr(detector, img) -> List[str]:
     return candidates
 
 
+def _try_decode_pyzbar(img) -> List[str]:
+    """Use the ZBar-backed decoder for screenshots with overlays or blur."""
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+    except Exception:
+        return []
+
+    try:
+        decoded = zbar_decode(img)
+    except Exception:
+        return []
+
+    values: List[str] = []
+    for item in decoded or ():
+        raw = getattr(item, "data", b"")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        raw = str(raw or "").strip()
+        if raw:
+            values.append(raw)
+    return values
+
+
 def decode_qr_images(paths: List[Path]) -> List[str]:
-    """用 OpenCV QRCodeDetector 识别图片中的二维码内容。"""
+    """用 ZBar 和 OpenCV QRCodeDetector 识别图片中的二维码内容。"""
     import cv2
     import numpy as np
 
@@ -153,9 +176,26 @@ def decode_qr_images(paths: List[Path]) -> List[str]:
             if img is None:
                 continue
 
-            # 过小二维码（截图偏小）放大后再识别；再试灰度/反色
+            # 过小二维码（尤其是钉钉分享卡片截图）放大后再识别。
+            # 这类图片的二维码经常贴近截图内容边缘，实际静区不足；
+            # 补一圈白边能让 OpenCV 的定位器稳定找到三个定位点。
             variants = [img]
             h, w = img.shape[:2]
+            min_side = min(h, w)
+            if min_side < 400:
+                scaled = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+                pad = max(4, int(round(min(scaled.shape[:2]) * 0.01)))
+                variants.append(
+                    cv2.copyMakeBorder(
+                        scaled,
+                        pad,
+                        pad,
+                        pad,
+                        pad,
+                        cv2.BORDER_CONSTANT,
+                        value=(255, 255, 255),
+                    )
+                )
             if min(h, w) < 300:
                 scale = max(2, int(400 / max(1, min(h, w))))
                 variants.append(
@@ -170,7 +210,13 @@ def decode_qr_images(paths: List[Path]) -> List[str]:
             variants.append(cv2.bitwise_not(gray))
 
             candidates: List[str] = []
+            # ZBar is more tolerant of a play-button overlay in the middle of
+            # a DingTalk live QR code. OpenCV remains the fallback for installs
+            # where the optional ZBar DLL is unavailable.
+            candidates.extend(_try_decode_pyzbar(img))
             for v in variants:
+                if not candidates:
+                    candidates.extend(_try_decode_pyzbar(v))
                 candidates.extend(_try_decode_qr(detector, v))
                 if candidates:
                     break

@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.1.1
+# DingTalkDownloader release version: 1.1.2
+import os
+
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 datas = [('assets\\download.ico', 'assets')]
 binaries = []
@@ -9,6 +12,11 @@ tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('darkdetect')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+pyzbar_binaries = collect_dynamic_libs('pyzbar')
+binaries += pyzbar_binaries
+hiddenimports += ['pyzbar.pyzbar']
+pyzbar_dir = os.path.dirname(__import__('pyzbar').__file__)
+datas += [(os.path.join(pyzbar_dir, 'zbar-LICENSE.txt'), 'pyzbar')]
 
 
 a = Analysis(
