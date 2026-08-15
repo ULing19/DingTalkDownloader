@@ -110,7 +110,7 @@ class ReplayLinkCollectorTests(unittest.TestCase):
                 )
             )
 
-    def test_custom_root_allows_saved_destination(self):
+    def test_saved_destination_can_be_any_existing_directory(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
             selected_root = Path(root)
             group_folder = Path(other) / "目标群"

@@ -1065,43 +1065,29 @@ def build_gui():
         nonlocal collector_running
         try:
             settings = load_settings(COLLECTOR_SETTINGS)
-            customer_root = resolve_customer_root(settings)
-            if customer_root is None:
-                selected_root = filedialog.askdirectory(
-                    parent=app,
-                    title="选择保存根目录（包含群文件夹的上级目录）",
-                    initialdir=str(Path.home()),
-                    mustexist=True,
-                )
-                if not selected_root:
-                    log("已取消选择保存根目录，没有覆盖任何链接文件。")
-                    return
-                customer_root = remember_customer_root(
-                    Path(selected_root),
-                    settings,
-                    settings_path=COLLECTOR_SETTINGS,
-                )
+            initial_directory = resolve_customer_root(settings) or Path.home()
             destination = discover_destination(
                 result,
                 settings,
-                customer_root,
+                None,
             )
             if destination is None:
                 label = result.group_name or f"群 {result.cid}"
                 selected = filedialog.askdirectory(
                     parent=app,
                     title=f"选择“{label}”的保存文件夹",
-                    initialdir=str(customer_root),
+                    initialdir=str(initial_directory),
                     mustexist=True,
                 )
                 if not selected:
                     log("已取消选择保存位置，没有覆盖任何链接文件。")
                     return
-                destination = Path(selected) / LINK_FILE_NAME
-                if not _path_within(destination, customer_root):
-                    raise ReplayExtractionError(
-                        "保存位置必须位于已选择的保存根目录"
-                    )
+                selected_directory = remember_customer_root(
+                    Path(selected),
+                    settings,
+                    settings_path=COLLECTOR_SETTINGS,
+                )
+                destination = selected_directory / LINK_FILE_NAME
 
             atomic_write_links(destination, result.urls)
             remember_warning = ""
@@ -1111,7 +1097,6 @@ def build_gui():
                     destination,
                     settings,
                     settings_path=COLLECTOR_SETTINGS,
-                    allowed_root=customer_root,
                 )
             except Exception:
                 remember_warning = "；保存位置记忆失败，下次可能需要重新选择"
@@ -1348,8 +1333,8 @@ def build_gui():
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
     log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
     log(
-        f"当前群链接获取后会保存到已配置保存根目录下对应群目录的 {LINK_FILE_NAME}；"
-        "首次使用时会提示选择保存根目录。"
+        f"当前群链接获取后会保存到所选群文件夹的 {LINK_FILE_NAME}；"
+        "每个群都可以使用不同保存位置。"
     )
     if not exe_path:
         log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")

@@ -110,7 +110,7 @@ def resolve_customer_root(
     settings: Dict[str, object],
     fallback: Path = DEFAULT_CUSTOMER_ROOT,
 ) -> Optional[Path]:
-    """Return a configured existing root, or the portable default when present."""
+    """Return the last selected directory, or the portable default when present."""
     configured = _existing_absolute_directory(settings.get("customer_root"))
     if configured is not None:
         return configured
@@ -122,10 +122,10 @@ def remember_customer_root(
     settings: Dict[str, object],
     settings_path: Optional[Path] = None,
 ) -> Path:
-    """Persist a user-selected existing root and return its resolved path."""
+    """Persist the last user-selected directory and return its resolved path."""
     resolved = _existing_absolute_directory(root)
     if resolved is None:
-        raise ReplayExtractionError("保存根目录必须是已存在的绝对路径")
+        raise ReplayExtractionError("保存文件夹必须是已存在的绝对路径")
     settings["customer_root"] = str(resolved)
     save_settings(settings, settings_path)
     return resolved
@@ -356,39 +356,18 @@ class CollectorApp:
         from tkinter import filedialog
 
         self.result = result
-        customer_root = self.customer_root or resolve_customer_root(self.settings)
-        if customer_root is None:
-            selected_root = filedialog.askdirectory(
-                parent=self.root,
-                title="选择保存根目录（包含群文件夹的上级目录）",
-                initialdir=str(Path.home()),
-                mustexist=True,
-            )
-            if not selected_root:
-                self.running = False
-                self.progress.stop()
-                self.retry_button.configure(state="normal")
-                self.status_label.configure(text="已取消选择保存根目录。", fg="#374151")
-                self.detail_label.configure(text="没有写入或覆盖任何链接文件。")
-                return
-            try:
-                customer_root = remember_customer_root(
-                    Path(selected_root),
-                    self.settings,
-                )
-            except Exception as exc:
-                self._scan_failed(exc)
-                return
-            self.customer_root = customer_root
-
-        destination = discover_destination(result, self.settings, customer_root)
+        initial_directory = (
+            self.customer_root
+            or resolve_customer_root(self.settings)
+            or Path.home()
+        )
+        destination = discover_destination(result, self.settings, None)
         if destination is None:
             label = result.group_name or f"群 {result.cid}"
-            initial = str(customer_root)
             selected = filedialog.askdirectory(
                 parent=self.root,
                 title=f"选择“{label}”的保存文件夹",
-                initialdir=initial,
+                initialdir=str(initial_directory),
                 mustexist=True,
             )
             if not selected:
@@ -398,12 +377,16 @@ class CollectorApp:
                 self.status_label.configure(text="已取消选择保存位置。", fg="#374151")
                 self.detail_label.configure(text="没有写入或覆盖任何链接文件。")
                 return
-            destination = Path(selected) / LINK_FILE_NAME
-            if not _is_path_within(destination, customer_root):
-                self._scan_failed(
-                    ReplayExtractionError("保存位置必须位于已选择的保存根目录")
+            try:
+                selected_directory = remember_customer_root(
+                    Path(selected),
+                    self.settings,
                 )
+            except Exception as exc:
+                self._scan_failed(exc)
                 return
+            self.customer_root = selected_directory
+            destination = selected_directory / LINK_FILE_NAME
         try:
             atomic_write_links(destination, result.urls)
         except Exception as exc:
@@ -416,7 +399,6 @@ class CollectorApp:
                 result,
                 destination,
                 self.settings,
-                allowed_root=customer_root,
             )
         except Exception:
             settings_warning = "；保存位置记忆失败，下次可能需要重新选择"
@@ -439,29 +421,14 @@ class CollectorApp:
 
         if self.result is None:
             return
-        customer_root = self.customer_root or resolve_customer_root(self.settings)
-        if customer_root is None:
-            selected_root = filedialog.askdirectory(
-                parent=self.root,
-                title="选择保存根目录（包含群文件夹的上级目录）",
-                initialdir=str(Path.home()),
-                mustexist=True,
-            )
-            if not selected_root:
-                return
-            try:
-                customer_root = remember_customer_root(
-                    Path(selected_root),
-                    self.settings,
-                )
-            except Exception as exc:
-                self._scan_failed(exc)
-                return
-            self.customer_root = customer_root
         initial = (
             str(self.destination.parent)
             if self.destination is not None and self.destination.parent.is_dir()
-            else str(customer_root)
+            else str(
+                self.customer_root
+                or resolve_customer_root(self.settings)
+                or Path.home()
+            )
         )
         selected = filedialog.askdirectory(
             parent=self.root,
@@ -471,13 +438,16 @@ class CollectorApp:
         )
         if not selected:
             return
-        destination = Path(selected) / LINK_FILE_NAME
-        if not _is_path_within(destination, customer_root):
-            self.status_label.configure(
-                text="保存位置必须位于已选择的保存根目录",
-                fg="#b42318",
+        try:
+            selected_directory = remember_customer_root(
+                Path(selected),
+                self.settings,
             )
+        except Exception as exc:
+            self._scan_failed(exc)
             return
+        self.customer_root = selected_directory
+        destination = selected_directory / LINK_FILE_NAME
         try:
             atomic_write_links(destination, self.result.urls)
         except Exception as exc:
@@ -489,7 +459,6 @@ class CollectorApp:
                 self.result,
                 destination,
                 self.settings,
-                allowed_root=customer_root,
             )
         except Exception:
             settings_warning = "；保存位置记忆失败，下次可能需要重新选择"
