@@ -18,6 +18,11 @@
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">反馈问题</a>
 </p>
 
+## 交流与反馈
+
+- QQ群：`1103756143`
+- 问题反馈：<https://github.com/ULing19/DingTalkDownloader/issues>
+
 > 本项目不是钉钉官方软件。请只处理你本人有权观看或下载的内容，并遵守钉钉服务条款、版权法规和所在组织的使用规定。
 
 ## 这份 README 怎么读
