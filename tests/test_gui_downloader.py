@@ -4,6 +4,7 @@ import queue
 import tempfile
 import threading
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -67,10 +68,69 @@ class GuiDownloaderTests(unittest.TestCase):
             run_live.assert_called_once()
             run_media.assert_called_once()
 
+    def test_godingtalk_same_titles_are_kept_with_numbered_names(self):
+        class FakeProcess:
+            def __init__(self, output_dir):
+                Path(output_dir, "同名视频.mp4").write_bytes(b"video")
+                self.stdout = StringIO("标题: 同名视频\n下载成功\n")
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            godingtalk.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+
+            def fake_popen(command, **_kwargs):
+                output_dir = command[command.index("-saveDir") + 1]
+                return FakeProcess(output_dir)
+
+            with mock.patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                self.assertEqual(worker._run_godingtalk(0, "https://example.test/one")[0], True)
+                self.assertEqual(worker._run_godingtalk(1, "https://example.test/two")[0], True)
+
+            self.assertEqual(
+                sorted(path.name for path in (root_path / "out").glob("*.mp4")),
+                ["同名视频 (1).mp4", "同名视频.mp4"],
+            )
+            self.assertEqual(list((root_path / "out").glob(".dingtalk-task-*")), [])
+
     def test_compact_ui_text_prevents_long_row_content(self):
         rendered = gui.compact_ui_text("x" * 100, 24)
         self.assertEqual(len(rendered), 24)
         self.assertTrue(rendered.endswith("…"))
+
+    def test_collector_path_guard_stays_inside_customer_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            customer_root = Path(root)
+            self.assertTrue(
+                gui._path_within(customer_root / "群" / "链接集.txt", customer_root)
+            )
+            self.assertFalse(
+                gui._path_within(customer_root.parent / "链接集.txt", customer_root)
+            )
 
     def test_decode_qr_images_recovers_small_qr_without_quiet_zone(self):
         """Small card screenshots need a white border before OpenCV detection."""

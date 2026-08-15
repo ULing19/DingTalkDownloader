@@ -10,8 +10,18 @@ New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
 # prevents local notes or experimental tool files from being redistributed.
 # Use an ASCII wildcard here because Windows PowerShell 5.1 can decode a
 # BOM-less script's literal Chinese filename with the active code page.
-$guides = Get-ChildItem -LiteralPath $SourceDir -File -Filter '????.txt' |
+$guides = @(Get-ChildItem -LiteralPath $SourceDir -File -Filter '????.txt' |
     Where-Object { $_.BaseName.Length -eq 4 }
+)
+# The collector guide has a longer localized filename. Filter by the decoded
+# filename length so Windows PowerShell 5.1 does not depend on a BOM-less
+# script's active code page when matching Chinese literals.
+$collectorGuide = @(Get-ChildItem -LiteralPath $SourceDir -File -Filter '??????????.txt' |
+    Where-Object { $_.BaseName.Length -eq 10 }
+)
+if ($collectorGuide) {
+    $guides += $collectorGuide
+}
 if (-not $guides) {
     Write-Error "No text guide found in $SourceDir"
     exit 1
