@@ -15,6 +15,7 @@ import queue
 import shutil
 import threading
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,21 @@ from dingtalk_media import (
     classify_dingtalk_url,
     download_resolved,
     find_mediago,
+)
+from dingtalk_replay_extractor import (
+    DingTalkNotReadyError,
+    IncompleteReplayListError,
+    ReplayExtractionError,
+    ReplayExtractionResult,
+    atomic_write_links,
+    extract_current_group_replays,
+)
+from replay_link_collector import (
+    DEFAULT_CUSTOMER_ROOT,
+    LINK_FILE_NAME,
+    discover_destination,
+    load_settings,
+    remember_destination,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,6 +66,15 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 COOKIES_FILE = CONFIG_DIR / "cookies.json"
 PROJECT_URL = "https://github.com/ULing19/DingTalkDownloader"
 UPSTREAM_URL = "https://github.com/NAXG/GoDingtalk"
+COLLECTOR_SETTINGS = (
+    Path(
+        os.environ.get(
+            "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+        )
+    )
+    / "DingTalkReplayLinkCollector"
+    / "settings.json"
+)
 
 
 def _resource_path(relative: str) -> Path:
@@ -102,6 +127,15 @@ def find_ffmpeg() -> Optional[Path]:
         if found:
             return Path(found)
     return None
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    """Return whether a resolved path stays below the configured root."""
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def extract_urls_from_text(text: str) -> List[str]:
@@ -443,15 +477,48 @@ class DownloadWorker(threading.Thread):
         except Exception:
             return False, "", "媒体下载失败，请稍后重试"
 
+    def _next_output_path(self, source: Path) -> Path:
+        """Choose a non-destructive destination for an engine-produced file."""
+        stem = source.stem or "钉钉媒体"
+        suffix = source.suffix
+        candidate = self.save_dir / source.name
+        index = 1
+        while candidate.exists() or Path(str(candidate) + ".part").exists():
+            candidate = self.save_dir / f"{stem} ({index}){suffix}"
+            index += 1
+        return candidate
+
+    def _promote_godingtalk_outputs(self, staging_dir: Path) -> int:
+        """Move one GoDingtalk result out of its private staging directory."""
+        outputs = [
+            path
+            for path in staging_dir.rglob("*")
+            if path.is_file() and not path.name.endswith(".part")
+        ]
+        moved = 0
+        for source in sorted(outputs):
+            destination = self._next_output_path(source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            moved += 1
+        return moved
+
     def _run_godingtalk(self, index: int, url: str):
         if self.godingtalk is None:
             return False, "", "未找到 GoDingtalk 可执行文件"
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=".dingtalk-task-", dir=str(self.save_dir))
+            )
+        except OSError:
+            return False, "", "无法创建临时保存目录"
         cmd = [
             str(self.godingtalk),
             "-url",
             url,
             "-saveDir",
-            str(self.save_dir),
+            str(staging_dir),
             "-thread",
             str(self.thread_count),
         ]
@@ -478,6 +545,7 @@ class DownloadWorker(threading.Thread):
                 creationflags=creationflags,
             )
         except Exception as exc:
+            shutil.rmtree(staging_dir, ignore_errors=True)
             return False, title, f"启动失败: {exc}"
 
         self._set_current_process(proc)
@@ -564,10 +632,17 @@ class DownloadWorker(threading.Thread):
 
             code = proc.wait()
             if success or code == 0:
+                try:
+                    moved = self._promote_godingtalk_outputs(staging_dir)
+                except OSError:
+                    return False, title, "保存下载文件失败"
+                if moved == 0:
+                    return False, title, "下载引擎未生成输出文件"
                 return True, title, ""
             return False, title, last_err or f"进程退出码 {code}"
         finally:
             self._set_current_process(None)
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +674,7 @@ def build_gui():
     event_q: queue.Queue = queue.Queue()
     stop_event = threading.Event()
     worker: Optional[DownloadWorker] = None
+    collector_running = False
 
     # ---------- 顶部工具栏 ----------
     top = ctk.CTkFrame(app, fg_color="transparent")
@@ -763,6 +839,23 @@ def build_gui():
         fg_color="#444",
         hover_color="#555",
     ).pack(side="left", padx=6)
+
+    collector_row = ctk.CTkFrame(left, fg_color="transparent")
+    collector_row.pack(fill="x", padx=12, pady=(0, 10))
+    collector_btn = ctk.CTkButton(
+        collector_row,
+        text="获取当前群回放链接",
+        width=180,
+        fg_color="#2f7d67",
+        hover_color="#256653",
+    )
+    collector_btn.pack(side="left")
+    ctk.CTkLabel(
+        collector_row,
+        text="先在钉钉打开目标群的直播广场",
+        text_color="gray65",
+        font=ctk.CTkFont(size=11),
+    ).pack(side="left", padx=10)
 
     # ---------- 右侧任务列表 ----------
     right = ctk.CTkFrame(body)
@@ -949,6 +1042,116 @@ def build_gui():
         }
         summary = "、".join(f"{label} {count}" for label, count in counts.items() if count)
         log(f"已解析 {len(urls)} 条任务（{summary}）")
+
+    def _collector_error_message(error: Exception) -> str:
+        if isinstance(error, DingTalkNotReadyError):
+            return "请先在钉钉打开目标群的直播广场，切换到“全部”并保持页面打开。"
+        if isinstance(error, IncompleteReplayListError):
+            return str(error)
+        if isinstance(error, ReplayExtractionError):
+            return str(error)
+        return "读取当前群失败，请确认钉钉页面已打开后重试。"
+
+    def _collector_failed(error: Exception) -> None:
+        nonlocal collector_running
+        collector_running = False
+        collector_btn.configure(state="normal")
+        message = _collector_error_message(error)
+        log(f"当前群链接获取失败：{message}")
+        messagebox.showerror("获取当前群链接失败", message)
+
+    def _collector_succeeded(result: ReplayExtractionResult) -> None:
+        nonlocal collector_running
+        try:
+            if not DEFAULT_CUSTOMER_ROOT.is_dir():
+                raise ReplayExtractionError(
+                    f"未找到保存根目录：{DEFAULT_CUSTOMER_ROOT}\n"
+                    "请确认客户资料磁盘已连接后重试。"
+                )
+
+            settings = load_settings(COLLECTOR_SETTINGS)
+            destination = discover_destination(
+                result,
+                settings,
+                DEFAULT_CUSTOMER_ROOT,
+            )
+            if destination is None:
+                label = result.group_name or f"群 {result.cid}"
+                selected = filedialog.askdirectory(
+                    parent=app,
+                    title=f"选择“{label}”的保存文件夹",
+                    initialdir=str(DEFAULT_CUSTOMER_ROOT),
+                    mustexist=True,
+                )
+                if not selected:
+                    log("已取消选择保存位置，没有覆盖任何链接文件。")
+                    return
+                destination = Path(selected) / LINK_FILE_NAME
+                if not _path_within(destination, DEFAULT_CUSTOMER_ROOT):
+                    raise ReplayExtractionError(
+                        f"保存位置必须位于 {DEFAULT_CUSTOMER_ROOT}"
+                    )
+
+            atomic_write_links(destination, result.urls)
+            remember_warning = ""
+            try:
+                remember_destination(
+                    result,
+                    destination,
+                    settings,
+                    settings_path=COLLECTOR_SETTINGS,
+                    allowed_root=DEFAULT_CUSTOMER_ROOT,
+                )
+            except Exception:
+                remember_warning = "；保存位置记忆失败，下次可能需要重新选择"
+
+            added = add_urls(result.urls, "当前群回放")
+            parse_to_tasks()
+            label = result.group_name or f"群 {result.cid}"
+            log(
+                f"已获取“{label}”的 {len(result.links)} 个回放链接，"
+                f"新增 {added} 条，已保存到 {destination}{remember_warning}"
+            )
+            messagebox.showinfo(
+                "当前群链接",
+                f"已获取 {len(result.links)} 个回放链接，并加入任务列表。\n"
+                f"保存位置：{destination}",
+            )
+        except Exception as exc:
+            _collector_failed(exc)
+        finally:
+            collector_running = False
+            collector_btn.configure(state="normal")
+
+    def collect_current_group_links() -> None:
+        nonlocal collector_running
+        if collector_running:
+            return
+        if state.running:
+            messagebox.showwarning("任务进行中", "请先停止当前下载任务，再获取新的群回放链接。")
+            return
+        if not DEFAULT_CUSTOMER_ROOT.is_dir():
+            _collector_failed(
+                ReplayExtractionError(
+                    f"未找到保存根目录：{DEFAULT_CUSTOMER_ROOT}\n"
+                    "请确认客户资料磁盘已连接后重试。"
+                )
+            )
+            return
+
+        collector_running = True
+        collector_btn.configure(state="disabled")
+        log("正在只读检查当前钉钉直播广场，请保持目标群页面和末页打开…")
+
+        def worker() -> None:
+            try:
+                result = extract_current_group_replays()
+            except Exception as exc:
+                app.after(0, lambda error=exc: _collector_failed(error))
+                return
+            app.after(0, lambda: _collector_succeeded(result))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def open_save_dir():
         d = Path(save_var.get() or DEFAULT_SAVE)
@@ -1137,9 +1340,11 @@ def build_gui():
     open_btn.configure(command=open_save_dir)
     login_btn.configure(command=do_login)
     repo_btn.configure(command=open_project_link)
+    collector_btn.configure(command=collect_current_group_links)
 
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
     log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
+    log(f"当前群链接获取后会保存到 {DEFAULT_CUSTOMER_ROOT} 下对应群目录的 {LINK_FILE_NAME}。")
     if not exe_path:
         log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")
     if not mediago_path:
