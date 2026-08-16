@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 import dingtalk_media as media
@@ -14,7 +15,11 @@ def _mp4_box(box_type: bytes, payload: bytes) -> bytes:
     return (len(payload) + 8).to_bytes(4, "big") + box_type + payload
 
 
-def _test_mp4(video_ms: int, audio_ms: int) -> bytes:
+def _mp4_extended_box(box_type: bytes, payload: bytes) -> bytes:
+    return b"\0\0\0\1" + box_type + (len(payload) + 16).to_bytes(8, "big") + payload
+
+
+def _test_mp4(video_ms: int, audio_ms: Optional[int]) -> bytes:
     timescale = 1000
 
     def track(handler: bytes, duration: int) -> bytes:
@@ -28,14 +33,15 @@ def _test_mp4(video_ms: int, audio_ms: int) -> bytes:
         hdlr = _mp4_box(b"hdlr", b"\0" * 8 + handler)
         return _mp4_box(b"trak", tkhd + _mp4_box(b"mdia", mdhd + hdlr))
 
-    total = max(video_ms, audio_ms)
+    total = max(video_ms, audio_ms or 0)
     mvhd = _mp4_box(
         b"mvhd",
         b"\0" * 12 + timescale.to_bytes(4, "big") + total.to_bytes(4, "big"),
     )
-    return _mp4_box(b"ftyp", b"isom\0\0\2\0isom") + _mp4_box(
-        b"moov", mvhd + track(b"vide", video_ms) + track(b"soun", audio_ms)
-    )
+    tracks = track(b"vide", video_ms)
+    if audio_ms is not None:
+        tracks += track(b"soun", audio_ms)
+    return _mp4_box(b"ftyp", b"isom\0\0\2\0isom") + _mp4_box(b"moov", mvhd + tracks)
 
 
 class _FakeProcess:
@@ -72,6 +78,21 @@ class _FakeResponse:
         return None
 
 
+class _HangingProcess(_FakeProcess):
+    def __init__(self):
+        super().__init__()
+        self.terminated = False
+
+    def communicate(self, timeout=None):
+        if self.terminated:
+            return b"", b""
+        raise media.subprocess.TimeoutExpired("tool", timeout)
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+
 class DingtalkMediaTests(unittest.TestCase):
     def test_ffmpeg_hls_command_preserves_and_normalizes_timestamps(self):
         with tempfile.TemporaryDirectory() as root:
@@ -94,6 +115,7 @@ class DingtalkMediaTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertLess(command.index("-fflags"), command.index("-i"))
             self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
+            self.assertEqual(command[command.index("-rw_timeout") + 1], "30000000")
             self.assertIn("-protocol_whitelist", command)
             self.assertIn("0:v:0?", command)
             self.assertIn("0:a:0?", command)
@@ -117,6 +139,86 @@ class DingtalkMediaTests(unittest.TestCase):
             self.assertAlmostEqual(timeline.audio_end, 10.04)
             self.assertEqual(media.media_av_sync_warning(normal), "")
             self.assertIn("视频轨比音频早结束", media.media_av_sync_warning(abnormal))
+
+    def test_mp4_timeline_supports_version_one_extended_boxes_and_edit_start(self):
+        timescale = 1000
+
+        def track(handler: bytes, duration: int, start_delay: int) -> bytes:
+            tkhd = _mp4_box(
+                b"tkhd",
+                b"\1\0\0\0" + b"\0" * 24 + duration.to_bytes(8, "big"),
+            )
+            mdhd = _mp4_box(
+                b"mdhd",
+                b"\1\0\0\0"
+                + b"\0" * 16
+                + timescale.to_bytes(4, "big")
+                + duration.to_bytes(8, "big"),
+            )
+            hdlr = _mp4_box(b"hdlr", b"\0" * 8 + handler)
+            edits = (
+                b"\0" * 4
+                + (2).to_bytes(4, "big")
+                + start_delay.to_bytes(4, "big")
+                + (-1).to_bytes(4, "big", signed=True)
+                + b"\0\1\0\0"
+                + (duration - start_delay).to_bytes(4, "big")
+                + (0).to_bytes(4, "big", signed=True)
+                + b"\0\1\0\0"
+            )
+            return _mp4_box(
+                b"trak",
+                tkhd
+                + _mp4_box(b"edts", _mp4_box(b"elst", edits))
+                + _mp4_box(b"mdia", mdhd + hdlr),
+            )
+
+        mvhd = _mp4_box(
+            b"mvhd",
+            b"\1\0\0\0" + b"\0" * 16 + timescale.to_bytes(4, "big") + (10_000).to_bytes(8, "big"),
+        )
+        payload = _mp4_extended_box(
+            b"moov", mvhd + track(b"vide", 10_000, 300) + track(b"soun", 10_000, 0)
+        )
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "version1.mp4"
+            path.write_bytes(payload)
+            timeline = media.inspect_mp4_av_timeline(path)
+            self.assertIsNotNone(timeline)
+            assert timeline is not None
+            self.assertAlmostEqual(timeline.video_start, 0.3)
+            self.assertAlmostEqual(timeline.video_end, 10.0)
+            self.assertIn("音视频起点相差", media.media_av_sync_warning(path))
+
+    def test_require_av_warns_for_unreadable_or_single_track_mp4(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            broken = root_path / "broken.mp4"
+            broken.write_bytes(b"\0\0\0\x20moovtruncated")
+            single = root_path / "single.mp4"
+            single.write_bytes(_test_mp4(10_000, None))
+            self.assertEqual(media.media_av_sync_warning(broken), "")
+            self.assertIn(
+                "无法确认音视频轨完整性",
+                media.media_av_sync_warning(broken, require_av=True),
+            )
+            self.assertIn(
+                "无法确认音视频轨完整性",
+                media.media_av_sync_warning(single, require_av=True),
+            )
+
+    def test_external_process_timeout_is_actionable(self):
+        process = _HangingProcess()
+        with mock.patch.object(media.time, "monotonic", side_effect=[0.0, 2.0]):
+            with self.assertRaises(media.MediaDownloadError) as raised:
+                media._communicate(
+                    process,
+                    None,
+                    timeout_seconds=1.0,
+                    timeout_message="媒体解析超时，请重试",
+                )
+        self.assertEqual(str(raised.exception), "媒体解析超时，请重试")
+        self.assertTrue(process.terminated)
 
     def test_classify_supported_url_kinds_and_normalize_yunpan(self):
         shanji = media.classify_dingtalk_url(
@@ -247,6 +349,41 @@ class DingtalkMediaTests(unittest.TestCase):
             self.assertEqual(output.suffix, ".pdf")
             self.assertEqual(output.read_bytes(), b"hello world")
             self.assertFalse(Path(str(output) + ".part").exists())
+
+    def test_download_direct_rejects_early_eof_when_length_is_known(self):
+        payload = {
+            "title": "截断文件",
+            "streams": {
+                "default": {
+                    "format": "binary",
+                    "urls": ["https://cdn.example.test/file.bin"],
+                }
+            },
+        }
+        response = _FakeResponse(
+            [b"short"],
+            {"Content-Type": "application/octet-stream", "Content-Length": "10"},
+        )
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            mediago.write_bytes(b"placeholder")
+            ffmpeg.write_bytes(b"placeholder")
+            with mock.patch.object(
+                media, "_run_mediago", return_value=payload
+            ), mock.patch.object(media, "urlopen", return_value=response):
+                with self.assertRaises(media.MediaDownloadError) as raised:
+                    media.download_resolved(
+                        "https://qr.dingtalk.com/page/yunpan?route=previewDentry&spaceId=1&fileId=2&type=file",
+                        media.KIND_YUNPAN,
+                        mediago,
+                        ffmpeg,
+                        None,
+                        root_path / "out",
+                    )
+            self.assertEqual(str(raised.exception), "文件下载不完整，请重试")
+            self.assertEqual(list((root_path / "out").glob("*.part")), [])
 
     def test_m3u8_playlist_is_temporary_and_converted_to_mp4(self):
         signed = "https://cdn.example.test/seg.ts?token=secret"

@@ -100,13 +100,125 @@ class GuiDownloaderTests(unittest.TestCase):
             ) as run_media, mock.patch.object(
                 worker, "_run_godingtalk", return_value=(True, "兼容结果", "")
             ) as run_live:
-                ok, title, message = worker._run_one(0, live)
+                ok, title, message, needs_check = worker._run_one(0, live)
 
             self.assertTrue(ok)
             self.assertEqual(title, "兼容结果")
             self.assertIn("兼容引擎", message)
+            self.assertFalse(needs_check)
             run_media.assert_called_once_with(0, live)
             run_live.assert_called_once_with(0, live.url)
+
+    def test_worker_treats_fallback_info_as_normal_completion(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            for executable in (godingtalk, mediago, ffmpeg):
+                executable.write_bytes(b"placeholder")
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+            )
+            event_q = queue.Queue()
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=mediago,
+                ffmpeg=ffmpeg,
+                tasks=[task],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=event_q,
+                stop_event=threading.Event(),
+            )
+
+            with mock.patch.object(
+                worker, "_run_mediago", return_value=(False, "", "解析失败")
+            ), mock.patch.object(
+                worker, "_run_godingtalk", return_value=(True, "兼容结果", "")
+            ):
+                worker.run()
+
+            events = []
+            while not event_q.empty():
+                events.append(event_q.get_nowait())
+            final_update = [
+                event
+                for event in events
+                if event["kind"] == "task_update"
+                and event.get("status") in {"完成", "需检查"}
+            ][-1]
+            self.assertEqual(final_update["status"], "完成")
+            self.assertIn("兼容引擎", final_update["message"])
+            self.assertEqual(
+                [event for event in events if event["kind"] == "finished"][-1]["warnings"],
+                0,
+            )
+
+    def test_worker_marks_warning_and_reports_warning_count(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            tasks = [
+                gui.make_task_item(
+                    "https://shanji.dingtalk.com/app/transcribes/warning",
+                    0,
+                ),
+                gui.make_task_item(
+                    "https://shanji.dingtalk.com/app/transcribes/normal",
+                    1,
+                ),
+            ]
+            event_q = queue.Queue()
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=None,
+                ffmpeg=None,
+                tasks=tasks,
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=event_q,
+                stop_event=threading.Event(),
+            )
+
+            with mock.patch.object(
+                worker,
+                "_run_one",
+                side_effect=[
+                    (True, "需检查课程", "视频轨比音频早结束", True),
+                    (True, "正常课程", "", False),
+                ],
+            ):
+                worker.run()
+
+            events = []
+            while not event_q.empty():
+                events.append(event_q.get_nowait())
+
+            final_updates = [
+                event
+                for event in events
+                if event["kind"] == "task_update"
+                and event.get("status") in {"需检查", "完成"}
+            ]
+            self.assertEqual(
+                [(event["index"], event["status"]) for event in final_updates],
+                [(0, "需检查"), (1, "完成")],
+            )
+            self.assertEqual(final_updates[0]["message"], "视频轨比音频早结束")
+
+            overall = [event for event in events if event["kind"] == "overall"]
+            self.assertEqual(
+                [(event["done"], event["warnings"]) for event in overall],
+                [(1, 1), (2, 1)],
+            )
+            finished = [event for event in events if event["kind"] == "finished"]
+            self.assertEqual(
+                finished,
+                [{"kind": "finished", "done": 2, "total": 2, "warnings": 1}],
+            )
 
     def test_godingtalk_same_titles_are_kept_with_numbered_names(self):
         class FakeProcess:
@@ -161,6 +273,127 @@ class GuiDownloaderTests(unittest.TestCase):
             )
             self.assertEqual(list((root_path / "out").glob(".dingtalk-task-*")), [])
             self.assertEqual(sync_check.call_count, 2)
+
+    def test_godingtalk_keeps_staging_when_output_move_fails_midway(self):
+        class FakeProcess:
+            def __init__(self, output_dir):
+                output_path = Path(output_dir)
+                (output_path / "a.mp4").write_bytes(b"first")
+                (output_path / "b.mp4").write_bytes(b"second")
+                self.stdout = StringIO("标题: 搬运测试\n下载成功\n")
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            godingtalk.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            staging_paths = []
+
+            def fake_popen(command, **_kwargs):
+                staging = Path(command[command.index("-saveDir") + 1])
+                staging_paths.append(staging)
+                return FakeProcess(staging)
+
+            real_move = gui.shutil.move
+            move_count = 0
+
+            def fail_second_move(source, destination):
+                nonlocal move_count
+                move_count += 1
+                if move_count == 2:
+                    raise OSError("simulated move failure")
+                return real_move(source, destination)
+
+            with mock.patch.object(
+                gui.subprocess, "Popen", side_effect=fake_popen
+            ), mock.patch.object(gui.shutil, "move", side_effect=fail_second_move):
+                ok, title, message = worker._run_godingtalk(
+                    0,
+                    "https://example.test/move-failure",
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(title, "搬运测试")
+            self.assertIn("未搬出的文件保留在", message)
+            self.assertEqual(len(staging_paths), 1)
+            staging = staging_paths[0]
+            self.assertTrue(staging.is_dir())
+            self.assertTrue((staging / "b.mp4").is_file())
+            self.assertEqual((staging / "b.mp4").read_bytes(), b"second")
+            self.assertEqual((root_path / "out" / "a.mp4").read_bytes(), b"first")
+
+    def test_godingtalk_rejects_partial_output_after_nonzero_exit(self):
+        class FakeProcess:
+            def __init__(self, output_dir):
+                Path(output_dir, "partial.mp4").write_bytes(b"partial")
+                self.stdout = StringIO("标题: 转换失败测试\n下载成功\n转换失败\n")
+                self.returncode = 1
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            godingtalk.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+
+            def fake_popen(command, **_kwargs):
+                return FakeProcess(command[command.index("-saveDir") + 1])
+
+            with mock.patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                ok, title, message = worker._run_godingtalk(
+                    0,
+                    "https://example.test/conversion-failure",
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(title, "转换失败测试")
+            self.assertIn("转换失败", message)
+            self.assertEqual(list((root_path / "out").glob("*.mp4")), [])
+            self.assertEqual(list((root_path / "out").glob(".dingtalk-task-*")), [])
 
     def test_mediago_propagates_timeline_warning(self):
         with tempfile.TemporaryDirectory() as root:

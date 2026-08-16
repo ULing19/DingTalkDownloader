@@ -304,7 +304,7 @@ class TaskItem:
     url: str
     kind: str = KIND_UNKNOWN
     kind_label: str = TASK_KIND_LABELS[KIND_UNKNOWN]
-    status: str = "等待中"  # 等待中 / 下载中 / 转换中 / 完成 / 失败 / 已取消
+    status: str = "等待中"  # 等待中 / 下载中 / 转换中 / 完成 / 需检查 / 失败 / 已取消
     title: str = ""
     progress: float = 0.0
     completed_seg: int = 0
@@ -385,6 +385,7 @@ class DownloadWorker(threading.Thread):
         self.save_dir.mkdir(parents=True, exist_ok=True)
         total = len(self.tasks)
         done = 0
+        warnings = 0
         for i, task in enumerate(self.tasks):
             if self.stop_event.is_set():
                 for j in range(i, total):
@@ -400,7 +401,7 @@ class DownloadWorker(threading.Thread):
             )
             self.emit("current", index=i)
 
-            ok, title, err = self._run_one(i, task)
+            ok, title, message, needs_check = self._run_one(i, task)
             if self.stop_event.is_set():
                 self.emit("task_update", index=i, status="已取消", message="用户停止")
                 for j in range(i + 1, total):
@@ -409,31 +410,34 @@ class DownloadWorker(threading.Thread):
 
             if ok:
                 done += 1
+                if needs_check:
+                    warnings += 1
                 self.emit(
                     "task_update",
                     index=i,
-                    status="完成",
+                    status="需检查" if needs_check else "完成",
                     progress=100.0,
                     title=title or task.title,
-                    message=err or "下载完成",
+                    message=message or "下载完成",
                 )
             else:
                 self.emit(
                     "task_update",
                     index=i,
                     status="失败",
-                    message=err or "未知错误",
+                    message=message or "未知错误",
                 )
-            self.emit("overall", done=done, total=total)
+            self.emit("overall", done=done, total=total, warnings=warnings)
 
-        self.emit("finished", done=done, total=total)
+        self.emit("finished", done=done, total=total, warnings=warnings)
 
     def _run_one(self, index: int, task: TaskItem):
         if task.kind == KIND_UNKNOWN:
-            return False, "", "无法识别链接类型，请确认链接完整"
+            return False, "", "无法识别链接类型，请确认链接完整", False
 
         if task.kind in {KIND_SHANJI, KIND_YUNPAN}:
-            return self._run_mediago(index, task)
+            ok, title, message = self._run_mediago(index, task)
+            return ok, title, message, ok and bool(message)
 
         if task.kind == KIND_LIVE:
             media_error = ""
@@ -445,7 +449,7 @@ class DownloadWorker(threading.Thread):
             ):
                 ok, title, media_error = self._run_mediago(index, task)
                 if ok or self.stop_event.is_set():
-                    return ok, title, media_error
+                    return ok, title, media_error, ok and bool(media_error)
                 self.emit(
                     "task_update",
                     index=index,
@@ -461,17 +465,19 @@ class DownloadWorker(threading.Thread):
                         title,
                         fallback_message
                         or ("原始 HLS 链路不可用，已由兼容引擎完成" if media_error else ""),
+                        bool(fallback_message),
                     )
                 if media_error:
                     return (
                         False,
                         title,
                         f"原始 HLS：{media_error}；兼容引擎：{fallback_message}",
+                        False,
                     )
-                return False, title, fallback_message
-            return False, "", media_error or "未找到可用的群回放下载引擎"
+                return False, title, fallback_message, False
+            return False, "", media_error or "未找到可用的群回放下载引擎", False
 
-        return False, "", "该钉钉链接暂不支持"
+        return False, "", "该钉钉链接暂不支持", False
 
     def _run_mediago(self, index: int, task: TaskItem):
         if self.mediago is None or not self.mediago.is_file():
@@ -504,7 +510,10 @@ class DownloadWorker(threading.Thread):
                 stop_event=self.stop_event,
                 progress_cb=progress_callback,
             )
-            return True, title, media_av_sync_warning(output)
+            return True, title, media_av_sync_warning(
+                output,
+                require_av=task.kind == KIND_LIVE,
+            )
         except MediaDownloadError as exc:
             return False, "", str(exc)
         except Exception:
@@ -560,6 +569,7 @@ class DownloadWorker(threading.Thread):
 
         title = ""
         last_err = ""
+        cleanup_staging = True
         try:
             # Windows: 不弹黑窗
             creationflags = 0
@@ -584,7 +594,6 @@ class DownloadWorker(threading.Thread):
         self._set_current_process(proc)
         assert proc.stdout is not None
         buffer = ""
-        success = False
         try:
             while True:
                 if self.stop_event.is_set():
@@ -648,7 +657,6 @@ class DownloadWorker(threading.Thread):
                         continue
 
                     if "下载成功" in line or "转换完成" in line:
-                        success = True
                         continue
 
                     if any(
@@ -664,23 +672,29 @@ class DownloadWorker(threading.Thread):
                         continue
 
             code = proc.wait()
-            if success or code == 0:
+            if code == 0:
                 try:
                     moved = self._promote_godingtalk_outputs(staging_dir)
                 except OSError:
-                    return False, title, "保存下载文件失败"
+                    cleanup_staging = False
+                    return (
+                        False,
+                        title,
+                        f"保存下载文件失败，未搬出的文件保留在：{staging_dir}",
+                    )
                 if not moved:
                     return False, title, "下载引擎未生成输出文件"
                 warnings = [
                     warning
                     for output in moved
-                    if (warning := media_av_sync_warning(output))
+                    if (warning := media_av_sync_warning(output, require_av=True))
                 ]
                 return True, title, warnings[0] if warnings else ""
             return False, title, last_err or f"进程退出码 {code}"
         finally:
             self._set_current_process(None)
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            if cleanup_staging:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -994,6 +1008,7 @@ def build_gui():
             "下载中": "#61afef",
             "转换中": "#c678dd",
             "完成": "#7ddea0",
+            "需检查": "#e5c07b",
             "失败": "#f07178",
             "已取消": "gray55",
         }.get(t.status, "gray70")
@@ -1342,18 +1357,25 @@ def build_gui():
                     parse_btn.configure(state="normal")
                     done = ev.get("done", 0)
                     total = ev.get("total", 0)
-                    overall_lbl.configure(text=f"完成: {done} / {total}")
+                    warnings = ev.get("warnings", 0)
+                    suffix = f"（{warnings} 项需检查）" if warnings else ""
+                    overall_lbl.configure(text=f"完成: {done} / {total}{suffix}")
                     if total:
                         overall_bar.set(done / total)
-                    log(f"全部结束：成功 {done} / {total}")
+                    log(f"全部结束：成功 {done} / {total}，需检查 {warnings}")
                     if stop_event.is_set():
                         log(f"任务已停止：停止前成功 {done} / {total}")
+                    elif done == total and total > 0 and warnings:
+                        messagebox.showwarning(
+                            "完成（需检查）",
+                            f"全部 {total} 个任务已保存，其中 {warnings} 个需要检查任务提示",
+                        )
                     elif done == total and total > 0:
                         messagebox.showinfo("完成", f"全部 {total} 个任务已下载完成")
                     elif total > 0:
                         messagebox.showwarning(
                             "部分完成",
-                            f"成功 {done} / {total}，请查看失败任务日志",
+                            f"成功 {done} / {total}，其中 {warnings} 个需检查；请查看任务日志",
                         )
         except queue.Empty:
             pass

@@ -43,7 +43,7 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.2.3 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.2.4 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -559,7 +559,13 @@ def _terminate_process(process: Any) -> None:
             pass
 
 
-def _communicate(process: Any, stop_event: Optional[threading.Event]) -> Tuple[bytes | str, bytes | str, int]:
+def _communicate(
+    process: Any,
+    stop_event: Optional[threading.Event],
+    timeout_seconds: Optional[float] = None,
+    timeout_message: str = "外部媒体工具执行超时",
+) -> Tuple[bytes | str, bytes | str, int]:
+    started = time.monotonic()
     while True:
         if _stop_requested(stop_event):
             _terminate_process(process)
@@ -568,6 +574,13 @@ def _communicate(process: Any, stop_event: Optional[threading.Event]) -> Tuple[b
             except Exception:
                 pass
             raise MediaDownloadError("已取消")
+        if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
+            _terminate_process(process)
+            try:
+                process.communicate(timeout=2)
+            except Exception:
+                pass
+            raise MediaDownloadError(timeout_message)
         try:
             stdout, stderr = process.communicate(timeout=0.2)
             return stdout or b"", stderr or b"", int(getattr(process, "returncode", 0) or 0)
@@ -602,7 +615,12 @@ def _run_mediago(
         raise MediaDownloadError("未找到 MediaGo 解析器")
     except OSError:
         raise MediaDownloadError("无法启动 MediaGo 解析器")
-    stdout, stderr, returncode = _communicate(process, stop_event)
+    stdout, stderr, returncode = _communicate(
+        process,
+        stop_event,
+        timeout_seconds=120.0,
+        timeout_message="媒体解析超时，请重试",
+    )
     if returncode != 0:
         combined = ""
         for value in (stdout, stderr):
@@ -940,18 +958,23 @@ def _format_timeline_gap(seconds: float) -> str:
     return f"{minutes} 分 {secs} 秒"
 
 
-def media_av_sync_warning(path: os.PathLike[str] | str) -> str:
+def media_av_sync_warning(
+    path: os.PathLike[str] | str,
+    require_av: bool = False,
+) -> str:
     """Return a concise warning for a structurally imbalanced MP4 timeline."""
 
     timeline = inspect_mp4_av_timeline(path)
     if timeline is None:
+        if require_av and Path(path).suffix.lower() == ".mp4":
+            return "已保存，但无法确认音视频轨完整性，建议用原回放链接重试"
         return ""
     warnings = []
     start_gap = abs(timeline.audio_start - timeline.video_start)
     if start_gap > 0.25:
         warnings.append(f"音视频起点相差约 {_format_timeline_gap(start_gap)}")
     end_gap = timeline.audio_end - timeline.video_end
-    end_threshold = max(2.0, max(timeline.audio_end, timeline.video_end) * 0.001)
+    end_threshold = 2.0
     if abs(end_gap) > end_threshold:
         if end_gap > 0:
             warnings.append(
@@ -981,6 +1004,8 @@ def _run_ffmpeg(
         "-y",
         "-fflags",
         "+genpts",
+        "-rw_timeout",
+        "30000000",
     ]
     if local_playlist:
         command.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto,data"])
@@ -1122,6 +1147,8 @@ def _download_direct(
                 _emit(progress_cb, "下载中", min(95.0, progress), "正在下载文件")
         if received <= 0:
             raise MediaDownloadError("下载结果为空")
+        if total > 0 and received != total:
+            raise MediaDownloadError("文件下载不完整，请重试")
         os.replace(part, output)
         committed = True
         _emit(progress_cb, "完成", 100.0, "下载完成")
