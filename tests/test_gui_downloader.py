@@ -32,7 +32,7 @@ class GuiDownloaderTests(unittest.TestCase):
         tasks = [gui.make_task_item(url, index) for index, url in enumerate(urls)]
         self.assertEqual([task.kind_label for task in tasks], ["群回放", "闪记", "群文件"])
 
-    def test_worker_routes_live_and_media_tasks_to_their_engines(self):
+    def test_worker_routes_live_and_media_tasks_to_mediago_first(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             godingtalk = root_path / "GoDingtalk.exe"
@@ -60,13 +60,53 @@ class GuiDownloaderTests(unittest.TestCase):
                 "https://shanji.dingtalk.com/app/transcribes/demo_123",
                 1,
             )
-            with mock.patch.object(worker, "_run_godingtalk", return_value=(True, "live", "")) as run_live, mock.patch.object(
+            with mock.patch.object(
+                worker, "_run_godingtalk", return_value=(True, "fallback", "")
+            ) as run_live, mock.patch.object(
                 worker, "_run_mediago", return_value=(True, "media", "")
             ) as run_media:
                 self.assertTrue(worker._run_one(0, live)[0])
                 self.assertTrue(worker._run_one(1, shanji)[0])
-            run_live.assert_called_once()
-            run_media.assert_called_once()
+            self.assertEqual(run_media.call_count, 2)
+            run_media.assert_any_call(0, live)
+            run_media.assert_any_call(1, shanji)
+            run_live.assert_not_called()
+
+    def test_live_falls_back_to_godingtalk_only_after_mediago_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            for executable in (godingtalk, mediago, ffmpeg):
+                executable.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=mediago,
+                ffmpeg=ffmpeg,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            live = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+            )
+            with mock.patch.object(
+                worker, "_run_mediago", return_value=(False, "", "解析失败")
+            ) as run_media, mock.patch.object(
+                worker, "_run_godingtalk", return_value=(True, "兼容结果", "")
+            ) as run_live:
+                ok, title, message = worker._run_one(0, live)
+
+            self.assertTrue(ok)
+            self.assertEqual(title, "兼容结果")
+            self.assertIn("兼容引擎", message)
+            run_media.assert_called_once_with(0, live)
+            run_live.assert_called_once_with(0, live.url)
 
     def test_godingtalk_same_titles_are_kept_with_numbered_names(self):
         class FakeProcess:
@@ -107,7 +147,11 @@ class GuiDownloaderTests(unittest.TestCase):
                 output_dir = command[command.index("-saveDir") + 1]
                 return FakeProcess(output_dir)
 
-            with mock.patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+            with mock.patch.object(
+                gui.subprocess, "Popen", side_effect=fake_popen
+            ), mock.patch.object(
+                gui, "media_av_sync_warning", return_value=""
+            ) as sync_check:
                 self.assertEqual(worker._run_godingtalk(0, "https://example.test/one")[0], True)
                 self.assertEqual(worker._run_godingtalk(1, "https://example.test/two")[0], True)
 
@@ -116,6 +160,37 @@ class GuiDownloaderTests(unittest.TestCase):
                 ["同名视频 (1).mp4", "同名视频.mp4"],
             )
             self.assertEqual(list((root_path / "out").glob(".dingtalk-task-*")), [])
+            self.assertEqual(sync_check.call_count, 2)
+
+    def test_mediago_propagates_timeline_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            output = root_path / "out" / "video.mp4"
+            mediago.write_bytes(b"placeholder")
+            ffmpeg.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=mediago,
+                ffmpeg=ffmpeg,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://shanji.dingtalk.com/app/transcribes/demo_123",
+                0,
+            )
+            with mock.patch.object(
+                gui, "download_resolved", return_value=("课程", output)
+            ), mock.patch.object(
+                gui, "media_av_sync_warning", return_value="视频轨异常"
+            ):
+                self.assertEqual(worker._run_mediago(0, task), (True, "课程", "视频轨异常"))
 
     def test_compact_ui_text_prevents_long_row_content(self):
         rendered = gui.compact_ui_text("x" * 100, 24)

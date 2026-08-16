@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import mmap
 import mimetypes
 import os
 import re
@@ -42,7 +43,7 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.1.1 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.2.3 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -124,6 +125,24 @@ class ResolvedMedia:
             "candidate_count": self.candidate_count,
             "has_m3u8_content": self.has_m3u8_content,
         }
+
+
+@dataclass(frozen=True)
+class AVTimeline:
+    """MP4 音视频轨在最终播放时间轴上的起止位置。"""
+
+    video_start: float
+    video_end: float
+    audio_start: float
+    audio_end: float
+
+    @property
+    def video_duration(self) -> float:
+        return max(0.0, self.video_end - self.video_start)
+
+    @property
+    def audio_duration(self) -> float:
+        return max(0.0, self.audio_end - self.audio_start)
 
 
 @dataclass(frozen=True)
@@ -720,6 +739,233 @@ def _headers_for_request(candidate: _MediaCandidate, cookies: Mapping[str, str])
     return headers
 
 
+def _iter_mp4_boxes(
+    mapped: mmap.mmap,
+    start: int,
+    end: int,
+) -> Iterator[Tuple[bytes, int, int]]:
+    """Yield validated ``(type, payload_start, box_end)`` MP4 boxes."""
+
+    cursor = max(0, start)
+    limit = min(len(mapped), end)
+    while cursor + 8 <= limit:
+        size = int.from_bytes(mapped[cursor : cursor + 4], "big")
+        box_type = bytes(mapped[cursor + 4 : cursor + 8])
+        header_size = 8
+        if size == 1:
+            if cursor + 16 > limit:
+                return
+            size = int.from_bytes(mapped[cursor + 8 : cursor + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = limit - cursor
+        box_end = cursor + size
+        if size < header_size or box_end > limit:
+            return
+        yield box_type, cursor + header_size, box_end
+        cursor = box_end
+
+
+def _mp4_movie_timescale(mapped: mmap.mmap, moov_start: int, moov_end: int) -> int:
+    for box_type, payload_start, box_end in _iter_mp4_boxes(mapped, moov_start, moov_end):
+        if box_type != b"mvhd" or payload_start >= box_end:
+            continue
+        version = mapped[payload_start]
+        offset = 20 if version == 1 else 12
+        if payload_start + offset + 4 <= box_end:
+            return int.from_bytes(
+                mapped[payload_start + offset : payload_start + offset + 4],
+                "big",
+            )
+    return 0
+
+
+def _mp4_edit_start(
+    mapped: mmap.mmap,
+    edts_start: int,
+    edts_end: int,
+    movie_timescale: int,
+) -> float:
+    if movie_timescale <= 0:
+        return 0.0
+    for box_type, payload_start, box_end in _iter_mp4_boxes(mapped, edts_start, edts_end):
+        if box_type != b"elst" or payload_start + 8 > box_end:
+            continue
+        version = mapped[payload_start]
+        entry_count = int.from_bytes(mapped[payload_start + 4 : payload_start + 8], "big")
+        cursor = payload_start + 8
+        entry_size = 20 if version == 1 else 12
+        start_delay = 0.0
+        for _ in range(entry_count):
+            if cursor + entry_size > box_end:
+                break
+            if version == 1:
+                segment_duration = int.from_bytes(mapped[cursor : cursor + 8], "big")
+                media_time = int.from_bytes(
+                    mapped[cursor + 8 : cursor + 16], "big", signed=True
+                )
+            else:
+                segment_duration = int.from_bytes(mapped[cursor : cursor + 4], "big")
+                media_time = int.from_bytes(
+                    mapped[cursor + 4 : cursor + 8], "big", signed=True
+                )
+            if media_time != -1:
+                break
+            start_delay += segment_duration / movie_timescale
+            cursor += entry_size
+        return start_delay
+    return 0.0
+
+
+def _mp4_track_timeline(
+    mapped: mmap.mmap,
+    track_start: int,
+    track_end: int,
+    movie_timescale: int,
+) -> Optional[Tuple[bytes, float, float]]:
+    handler = b""
+    media_duration = 0.0
+    presentation_duration = 0.0
+    start_delay = 0.0
+    for box_type, payload_start, box_end in _iter_mp4_boxes(mapped, track_start, track_end):
+        if box_type == b"tkhd" and payload_start < box_end and movie_timescale > 0:
+            version = mapped[payload_start]
+            offset = 28 if version == 1 else 20
+            width = 8 if version == 1 else 4
+            if payload_start + offset + width <= box_end:
+                raw_duration = int.from_bytes(
+                    mapped[payload_start + offset : payload_start + offset + width],
+                    "big",
+                )
+                if raw_duration not in {(1 << (width * 8)) - 1, 0}:
+                    presentation_duration = raw_duration / movie_timescale
+        elif box_type == b"edts":
+            start_delay = _mp4_edit_start(
+                mapped, payload_start, box_end, movie_timescale
+            )
+        elif box_type == b"mdia":
+            for media_type, media_start, media_end in _iter_mp4_boxes(
+                mapped, payload_start, box_end
+            ):
+                if media_type == b"hdlr" and media_start + 12 <= media_end:
+                    handler = bytes(mapped[media_start + 8 : media_start + 12])
+                elif media_type == b"mdhd" and media_start < media_end:
+                    version = mapped[media_start]
+                    scale_offset = 20 if version == 1 else 12
+                    duration_offset = 24 if version == 1 else 16
+                    duration_width = 8 if version == 1 else 4
+                    if media_start + duration_offset + duration_width > media_end:
+                        continue
+                    timescale = int.from_bytes(
+                        mapped[
+                            media_start + scale_offset : media_start + scale_offset + 4
+                        ],
+                        "big",
+                    )
+                    raw_duration = int.from_bytes(
+                        mapped[
+                            media_start
+                            + duration_offset : media_start
+                            + duration_offset
+                            + duration_width
+                        ],
+                        "big",
+                    )
+                    if (
+                        timescale > 0
+                        and raw_duration not in {(1 << (duration_width * 8)) - 1, 0}
+                    ):
+                        media_duration = raw_duration / timescale
+    if handler not in {b"vide", b"soun"}:
+        return None
+    end_time = presentation_duration or (start_delay + media_duration)
+    if end_time <= 0:
+        return None
+    return handler, start_delay, end_time
+
+
+def inspect_mp4_av_timeline(path: os.PathLike[str] | str) -> Optional[AVTimeline]:
+    """Read MP4 box metadata without loading the media payload into memory."""
+
+    source = Path(path)
+    try:
+        if source.suffix.lower() != ".mp4" or source.stat().st_size < 8:
+            return None
+        with open(source, "rb") as stream:
+            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                tracks: Dict[bytes, Tuple[float, float]] = {}
+                for box_type, moov_start, moov_end in _iter_mp4_boxes(
+                    mapped, 0, len(mapped)
+                ):
+                    if box_type != b"moov":
+                        continue
+                    movie_timescale = _mp4_movie_timescale(mapped, moov_start, moov_end)
+                    for child_type, track_start, track_end in _iter_mp4_boxes(
+                        mapped, moov_start, moov_end
+                    ):
+                        if child_type != b"trak":
+                            continue
+                        track = _mp4_track_timeline(
+                            mapped, track_start, track_end, movie_timescale
+                        )
+                        if track is None:
+                            continue
+                        handler, start_time, end_time = track
+                        previous = tracks.get(handler)
+                        if previous is None or end_time > previous[1]:
+                            tracks[handler] = (start_time, end_time)
+                video = tracks.get(b"vide")
+                audio = tracks.get(b"soun")
+                if video is None or audio is None:
+                    return None
+                return AVTimeline(
+                    video_start=video[0],
+                    video_end=video[1],
+                    audio_start=audio[0],
+                    audio_end=audio[1],
+                )
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _format_timeline_gap(seconds: float) -> str:
+    value = max(0.0, float(seconds))
+    if value < 60:
+        return f"{value:.1f} 秒"
+    rounded = int(round(value))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} 小时 {minutes} 分 {secs} 秒"
+    return f"{minutes} 分 {secs} 秒"
+
+
+def media_av_sync_warning(path: os.PathLike[str] | str) -> str:
+    """Return a concise warning for a structurally imbalanced MP4 timeline."""
+
+    timeline = inspect_mp4_av_timeline(path)
+    if timeline is None:
+        return ""
+    warnings = []
+    start_gap = abs(timeline.audio_start - timeline.video_start)
+    if start_gap > 0.25:
+        warnings.append(f"音视频起点相差约 {_format_timeline_gap(start_gap)}")
+    end_gap = timeline.audio_end - timeline.video_end
+    end_threshold = max(2.0, max(timeline.audio_end, timeline.video_end) * 0.001)
+    if abs(end_gap) > end_threshold:
+        if end_gap > 0:
+            warnings.append(
+                f"视频轨比音频早结束约 {_format_timeline_gap(end_gap)}"
+            )
+        else:
+            warnings.append(
+                f"音频轨比视频早结束约 {_format_timeline_gap(-end_gap)}"
+            )
+    if not warnings:
+        return ""
+    return "已保存，但检测到" + "；".join(warnings) + "，建议用原回放链接重试"
+
+
 def _run_ffmpeg(
     ffmpeg: Path,
     input_value: str,
@@ -727,10 +973,36 @@ def _run_ffmpeg(
     stop_event: Optional[threading.Event],
     local_playlist: bool,
 ) -> None:
-    command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y"]
+    command = [
+        str(ffmpeg),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-fflags",
+        "+genpts",
+    ]
     if local_playlist:
         command.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto,data"])
-    command.extend(["-i", input_value, "-c", "copy", "-f", "mp4", str(output_part)])
+    command.extend(
+        [
+            "-i",
+            input_value,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+            str(output_part),
+        ]
+    )
     try:
         process = subprocess.Popen(
             command,
@@ -914,6 +1186,7 @@ def download_resolved(
 
 
 __all__ = [
+    "AVTimeline",
     "KIND_LIVE",
     "KIND_SHANJI",
     "KIND_UNKNOWN",
@@ -924,6 +1197,8 @@ __all__ = [
     "classify_dingtalk_url",
     "download_resolved",
     "find_mediago",
+    "inspect_mp4_av_timeline",
+    "media_av_sync_warning",
     "resolve_with_mediago",
     "temporary_netscape_cookie_file",
 ]

@@ -15,5 +15,6 @@ MediaGo: https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0
 请保持 DingTalkDownloader.exe、GoDingtalk、mediago.exe 和 ffmpeg.exe 在同一目录。
 登录会话保存在 .goDingtalkConfig\，默认下载目录为 video\。
 同名下载会自动追加编号（例如 `(1)`、`(2)`），不会覆盖已有视频。
+若任务提示音视频轨结束时间异常，文件仍会保留；请先用原链接重试。
 中文完整说明: 使用说明.txt
 采集功能说明: 回放链接一键获取说明.txt

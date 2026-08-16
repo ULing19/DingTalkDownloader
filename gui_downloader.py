@@ -3,7 +3,7 @@
 """
 钉钉媒体批量下载器 - 图形界面
 支持：群直播回放、钉钉闪记、钉盘/群文件，以及文本/二维码批量导入。
-群直播优先调用 GoDingtalk；闪记和群文件由 MediaGo 后端处理。
+群直播优先通过 MediaGo 保留原始 HLS 时间轴，GoDingtalk 作为兼容回退。
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from dingtalk_media import (
     classify_dingtalk_url,
     download_resolved,
     find_mediago,
+    media_av_sync_warning,
 )
 from dingtalk_replay_extractor import (
     DingTalkNotReadyError,
@@ -333,7 +334,7 @@ class AppState:
 
 
 # ---------------------------------------------------------------------------
-# 下载工作线程：群回放优先 GoDingtalk，其余类型调用 MediaGo 后端
+# 下载工作线程：群回放优先 MediaGo 原始 HLS，GoDingtalk 作为兼容回退
 # ---------------------------------------------------------------------------
 
 class DownloadWorker(threading.Thread):
@@ -414,7 +415,7 @@ class DownloadWorker(threading.Thread):
                     status="完成",
                     progress=100.0,
                     title=title or task.title,
-                    message="下载完成",
+                    message=err or "下载完成",
                 )
             else:
                 self.emit(
@@ -435,9 +436,40 @@ class DownloadWorker(threading.Thread):
             return self._run_mediago(index, task)
 
         if task.kind == KIND_LIVE:
+            media_error = ""
+            if (
+                self.mediago is not None
+                and self.mediago.is_file()
+                and self.ffmpeg is not None
+                and self.ffmpeg.is_file()
+            ):
+                ok, title, media_error = self._run_mediago(index, task)
+                if ok or self.stop_event.is_set():
+                    return ok, title, media_error
+                self.emit(
+                    "task_update",
+                    index=index,
+                    status="解析中",
+                    progress=0.0,
+                    message="原始 HLS 链路不可用，正在尝试兼容引擎…",
+                )
             if self.godingtalk is not None and self.godingtalk.is_file():
-                return self._run_godingtalk(index, task.url)
-            return self._run_mediago(index, task)
+                ok, title, fallback_message = self._run_godingtalk(index, task.url)
+                if ok:
+                    return (
+                        True,
+                        title,
+                        fallback_message
+                        or ("原始 HLS 链路不可用，已由兼容引擎完成" if media_error else ""),
+                    )
+                if media_error:
+                    return (
+                        False,
+                        title,
+                        f"原始 HLS：{media_error}；兼容引擎：{fallback_message}",
+                    )
+                return False, title, fallback_message
+            return False, "", media_error or "未找到可用的群回放下载引擎"
 
         return False, "", "该钉钉链接暂不支持"
 
@@ -462,7 +494,7 @@ class DownloadWorker(threading.Thread):
             )
 
         try:
-            title, _ = download_resolved(
+            title, output = download_resolved(
                 url=task.url,
                 kind=task.kind,
                 mediago=self.mediago,
@@ -472,7 +504,7 @@ class DownloadWorker(threading.Thread):
                 stop_event=self.stop_event,
                 progress_cb=progress_callback,
             )
-            return True, title, ""
+            return True, title, media_av_sync_warning(output)
         except MediaDownloadError as exc:
             return False, "", str(exc)
         except Exception:
@@ -489,19 +521,19 @@ class DownloadWorker(threading.Thread):
             index += 1
         return candidate
 
-    def _promote_godingtalk_outputs(self, staging_dir: Path) -> int:
+    def _promote_godingtalk_outputs(self, staging_dir: Path) -> List[Path]:
         """Move one GoDingtalk result out of its private staging directory."""
         outputs = [
             path
             for path in staging_dir.rglob("*")
             if path.is_file() and not path.name.endswith(".part")
         ]
-        moved = 0
+        moved: List[Path] = []
         for source in sorted(outputs):
             destination = self._next_output_path(source)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
-            moved += 1
+            moved.append(destination)
         return moved
 
     def _run_godingtalk(self, index: int, url: str):
@@ -637,9 +669,14 @@ class DownloadWorker(threading.Thread):
                     moved = self._promote_godingtalk_outputs(staging_dir)
                 except OSError:
                     return False, title, "保存下载文件失败"
-                if moved == 0:
+                if not moved:
                     return False, title, "下载引擎未生成输出文件"
-                return True, title, ""
+                warnings = [
+                    warning
+                    for output in moved
+                    if (warning := media_av_sync_warning(output))
+                ]
+                return True, title, warnings[0] if warnings else ""
             return False, title, last_err or f"进程退出码 {code}"
         finally:
             self._set_current_process(None)

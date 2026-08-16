@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Build DingTalk GUI EXE 1.2.2
+title Build DingTalk GUI EXE 1.2.3
 
 set "BASE_PYTHON=python"
 if defined DTD_PYTHON set "BASE_PYTHON=%DTD_PYTHON%"
@@ -54,11 +54,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "tools\assemble_release.ps1" -RootDir "%CD%" -Version "1.2.2"
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\assemble_release.ps1" -RootDir "%CD%" -Version "1.2.3"
 if errorlevel 1 (
   echo [ERROR] Release assembly failed
   pause
   exit /b 1
 )
-echo [OK] Release folder: dist\DingTalkDownloader_1.2.2
+echo [OK] Release folder: dist\DingTalkDownloader_1.2.3
 endlocal

@@ -10,6 +10,34 @@ from unittest import mock
 import dingtalk_media as media
 
 
+def _mp4_box(box_type: bytes, payload: bytes) -> bytes:
+    return (len(payload) + 8).to_bytes(4, "big") + box_type + payload
+
+
+def _test_mp4(video_ms: int, audio_ms: int) -> bytes:
+    timescale = 1000
+
+    def track(handler: bytes, duration: int) -> bytes:
+        tkhd = _mp4_box(b"tkhd", b"\0" * 20 + duration.to_bytes(4, "big"))
+        mdhd = _mp4_box(
+            b"mdhd",
+            b"\0" * 12
+            + timescale.to_bytes(4, "big")
+            + duration.to_bytes(4, "big"),
+        )
+        hdlr = _mp4_box(b"hdlr", b"\0" * 8 + handler)
+        return _mp4_box(b"trak", tkhd + _mp4_box(b"mdia", mdhd + hdlr))
+
+    total = max(video_ms, audio_ms)
+    mvhd = _mp4_box(
+        b"mvhd",
+        b"\0" * 12 + timescale.to_bytes(4, "big") + total.to_bytes(4, "big"),
+    )
+    return _mp4_box(b"ftyp", b"isom\0\0\2\0isom") + _mp4_box(
+        b"moov", mvhd + track(b"vide", video_ms) + track(b"soun", audio_ms)
+    )
+
+
 class _FakeProcess:
     def __init__(self, stdout=b"{}", stderr=b"", returncode=0):
         self.stdout = stdout
@@ -45,6 +73,51 @@ class _FakeResponse:
 
 
 class DingtalkMediaTests(unittest.TestCase):
+    def test_ffmpeg_hls_command_preserves_and_normalizes_timestamps(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            ffmpeg = root_path / "ffmpeg.exe"
+            output = root_path / "output.mp4.part"
+            ffmpeg.write_bytes(b"placeholder")
+            output.write_bytes(b"mp4")
+            with mock.patch.object(
+                media.subprocess, "Popen", return_value=_FakeProcess()
+            ) as popen:
+                media._run_ffmpeg(
+                    ffmpeg,
+                    str(root_path / "playlist.m3u8"),
+                    output,
+                    None,
+                    True,
+                )
+
+            command = popen.call_args.args[0]
+            self.assertLess(command.index("-fflags"), command.index("-i"))
+            self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
+            self.assertIn("-protocol_whitelist", command)
+            self.assertIn("0:v:0?", command)
+            self.assertIn("0:a:0?", command)
+            self.assertEqual(
+                command[command.index("-avoid_negative_ts") + 1], "make_zero"
+            )
+            self.assertEqual(command[command.index("-movflags") + 1], "+faststart")
+
+    def test_mp4_timeline_flags_a_video_track_that_ends_early(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            normal = root_path / "normal.mp4"
+            abnormal = root_path / "abnormal.mp4"
+            normal.write_bytes(_test_mp4(10_000, 10_040))
+            abnormal.write_bytes(_test_mp4(7_000, 10_000))
+
+            timeline = media.inspect_mp4_av_timeline(normal)
+            self.assertIsNotNone(timeline)
+            assert timeline is not None
+            self.assertAlmostEqual(timeline.video_end, 10.0)
+            self.assertAlmostEqual(timeline.audio_end, 10.04)
+            self.assertEqual(media.media_av_sync_warning(normal), "")
+            self.assertIn("视频轨比音频早结束", media.media_av_sync_warning(abnormal))
+
     def test_classify_supported_url_kinds_and_normalize_yunpan(self):
         shanji = media.classify_dingtalk_url(
             "https://shanji.dingtalk.com/app/transcribes/abc_123#fragment"
