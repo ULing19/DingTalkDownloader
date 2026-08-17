@@ -43,6 +43,13 @@
 - 支持受限的多视频并发：分别控制单视频分片线程和同时下载的视频数量，避免无限制占满带宽；
 - 后台检查 GitHub 最新 Release，用户确认后下载并校验 SHA-256，再启动安装版或绿色版更新流程。
 
+### 1.3.4 兼容性更新
+
+- 登录不再要求安装 Google Chrome；Windows 10/11 会优先自动使用系统自带的 Microsoft Edge；
+- 同时自动发现 Chrome，以及 Brave、Chromium、Vivaldi、Opera、360、QQ 等 Chromium 内核浏览器；第三方浏览器能否登录取决于其 Chromium 调试接口兼容性；
+- 自动检测不到时，仍使用原有“重新登录”按钮选择一次 Chromium 浏览器程序，并在本机记住路径，不增加新的界面按钮；
+- 下载阶段只读取本机登录会话，不依赖浏览器持续运行。Firefox 不提供 GoDingtalk 所需的 Chromium 调试接口，因此不能用于自动登录。
+
 ### 1.3.3 修复重点
 
 - 修复“一键获取”完成后调用“解析到任务列表”可能直接失败的问题；
@@ -104,13 +111,13 @@
 
 ### 安装版（推荐）
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.3_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.4_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留 `video\` 和 `.goDingtalkConfig\`，以免误删下载结果与登录会话，同时删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存；确认不再需要时再手动删除前两个目录。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.3_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.4_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -123,7 +130,7 @@ ffmpeg.exe
 
 ## 首次使用
 
-1. 启动程序，点击“重新登录”，在钉钉页面完成授权。
+1. 启动程序，点击“重新登录”。程序优先使用 Windows 自带的 Microsoft Edge，无需另装 Google Chrome；未自动识别时按提示选择一个 Chromium 浏览器程序。
 2. 确认当前账号能在钉钉中打开目标回放、闪记或群文件。
 3. 将完整 URL 粘贴到左侧输入区，或导入文本文件、二维码图片；每行一个 URL，`#` 开头的行会被忽略。
 4. 点击“解析到任务列表”，检查链接类型、任务标题和保存目录。
@@ -132,6 +139,8 @@ ffmpeg.exe
 软件启动后会在后台检查 GitHub Release，也可以点击底部“检查更新”。发现新版时会先展示版本、文件类型和大小，用户确认后才下载；下载完成必须通过 SHA-256 校验。下载任务进行中不会启动更新。安装版由安装程序更新；绿色版由独立进程等待主程序退出，先预备全部新文件和旧文件备份，再原子替换，失败会自动回滚。`video`、`.goDingtalkConfig` 和其它用户文件不会被更新包删除。
 
 登录只证明当前账号的访问能力，不会提升群成员权限。会话保存在本机 `.goDingtalkConfig\`，不会自动上传 GitHub 或发送给项目作者。不要公开 `cookies.json`、浏览器 Cookie 导出文件、二维码截图中的私密链接或带令牌的日志。
+
+登录窗口使用独立会话，不会直接导入日常浏览器中的 Cookie。程序保证检测 Microsoft Edge，并兼容 GoDingtalk 原生支持的 Chrome；Brave、Chromium、Vivaldi、Opera 以及 Chromium 内核的 360/QQ 浏览器会自动发现并尝试，实际结果取决于具体版本。Firefox、Safari 和旧版 Internet Explorer 不兼容该登录引擎。完成一次有效登录后，解析和下载不要求浏览器保持打开。
 
 ## 保存结果与重名规则
 
@@ -200,6 +209,7 @@ python -m pytest -q
 
 ```text
 gui_downloader.py              # CustomTkinter 图形界面与任务队列
+browser_support.py             # Edge 与其他 Chromium 登录浏览器检测
 dingtalk_media.py              # 媒体地址、文件名和输出处理
 dingtalk_replay_extractor.py   # 当前群直播广场的只读链接识别
 replay_link_collector.py       # 链接文件保存与位置记忆
@@ -218,6 +228,8 @@ video\                         # 默认输出目录（本地数据）
 ## 常见问题
 
 **提示“未找到下载引擎”**：确认主程序、GoDingtalk、MediaGo 和 FFmpeg 在同一目录，并检查安全软件是否隔离了其中的文件。
+
+**没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.4`。程序会优先寻找 Microsoft Edge，并把 Edge 的完整路径传给登录引擎；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
 
 **提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 1.3.3，并粘贴完整原始链接。
 
@@ -255,4 +267,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.3`。
+当前 GUI/安装包版本：`1.3.4`。

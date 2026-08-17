@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from browser_support import (
+    find_login_browser,
+    launch_login_process,
+    login_browser_from_path,
+)
 from dingtalk_media import (
     KIND_LIVE,
     KIND_SHANJI,
@@ -1645,12 +1650,53 @@ def build_gui():
         if not exe_path:
             messagebox.showerror("错误", "未找到 GoDingtalk 可执行文件")
             return
-        log("正在启动登录（将打开浏览器/Chrome）…")
-        try:
-            subprocess.Popen(
-                [str(exe_path), "-login"],
-                cwd=str(APP_DIR),
+
+        settings = load_settings(COLLECTOR_SETTINGS)
+        configured_path = settings.get("login_browser_path")
+        browser = find_login_browser(
+            configured_path if isinstance(configured_path, str) else None
+        )
+        manually_selected = False
+        if browser is None:
+            messagebox.showinfo(
+                "选择登录浏览器",
+                "未自动找到 Microsoft Edge 或其他 Chromium 浏览器。\n\n"
+                "请选择 Edge、Chrome 或其他 Chromium 内核浏览器的可执行文件。"
+                "第三方浏览器是否可用取决于具体版本；Firefox 不支持此登录方式。",
             )
+            initial_dir = (
+                os.environ.get("PROGRAMFILES(X86)")
+                or os.environ.get("PROGRAMFILES")
+                or os.environ.get("LOCALAPPDATA")
+                or str(APP_DIR)
+            )
+            selected = filedialog.askopenfilename(
+                title="选择 Chromium 登录浏览器",
+                initialdir=initial_dir,
+                filetypes=[("浏览器程序", "*.exe"), ("所有文件", "*.*")],
+            )
+            if not selected:
+                log("登录已取消：没有可用的 Chromium 浏览器。")
+                return
+            browser = login_browser_from_path(selected)
+            if browser is None:
+                messagebox.showerror(
+                    "登录失败",
+                    "所选程序不存在、无法访问，或不是受支持的 Chromium 浏览器。",
+                )
+                return
+            manually_selected = True
+
+        if manually_selected:
+            settings["login_browser_path"] = str(browser.executable)
+            try:
+                save_settings(settings, COLLECTOR_SETTINGS)
+            except OSError as exc:
+                log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
+
+        log(f"正在使用 {browser.display_name} 打开钉钉登录…")
+        try:
+            launch_login_process(exe_path, browser, cwd=APP_DIR)
         except Exception as exc:
             messagebox.showerror("登录失败", str(exc))
 

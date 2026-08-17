@@ -1,5 +1,5 @@
 ================================================================================
-                         钉钉回放下载器 1.3.3
+                         钉钉回放下载器 1.3.4
                               使用说明
 ================================================================================
 
@@ -56,7 +56,7 @@
 三、安装与启动
 --------------------------------------------------------------------------------
 【安装版（推荐）】
-  1. 从 GitHub Releases 下载 DingTalkDownloader_1.3.3_Setup.exe。
+  1. 从 GitHub Releases 下载 DingTalkDownloader_1.3.4_Setup.exe。
   2. 双击安装程序，按向导选择目录。
   3. “创建桌面快捷方式”默认勾选，可按需要取消。
   4. 从开始菜单或桌面快捷方式启动。
@@ -64,7 +64,7 @@
   安装包已经包含 GUI、GoDingtalk、MediaGo、FFmpeg 和说明文件。
 
 【绿色版】
-  1. 下载 DingTalkDownloader_1.3.3_Portable.zip。
+  1. 下载 DingTalkDownloader_1.3.4_Portable.zip。
   2. 解压到任意目录后，双击 DingTalkDownloader.exe。
   3. 不要拆散以下文件：
        DingTalkDownloader.exe
@@ -81,9 +81,17 @@ Windows SmartScreen 可能提示“未知发布者”。请只从本项目 Relea
 
 四、首次使用与登录
 --------------------------------------------------------------------------------
-  1. 启动程序，点击“重新登录”。
-  2. 使用有权限观看目标回放、闪记或群文件视频的钉钉账号完成授权。
-  3. 确认浏览器中可以打开目标链接，再返回 GUI 解析任务。
+  1. 启动程序，点击“重新登录”。程序优先自动使用 Windows 自带的 Microsoft Edge，
+     不要求安装 Google Chrome。
+  2. 若未找到 Edge，程序会继续寻找 Chrome，并尝试发现 Brave、Chromium、
+     Vivaldi、Opera、360、QQ 等 Chromium 内核浏览器；第三方浏览器是否可登录
+     取决于具体版本的 Chromium 调试接口兼容性。仍未找到时按提示手动选择浏览器程序。
+  3. 使用有权限观看目标回放、闪记或群文件视频的钉钉账号完成授权。
+  4. 确认浏览器中可以打开目标链接，再返回 GUI 解析任务。
+
+Firefox、Safari 和 Internet Explorer 不提供本登录引擎所需的 Chromium 调试接口，
+不能用于自动登录。登录窗口使用独立会话，不会直接导入日常浏览器 Cookie；完成登录后，
+解析和下载不依赖浏览器持续运行。
 
 登录会话只保存在程序目录下：
   .goDingtalkConfig\
@@ -152,6 +160,12 @@ Q1：提示“未找到下载引擎”怎么办？
 A1：确认 DingTalkDownloader.exe、GoDingtalk_v2.5.2_windows_amd64.exe、
     mediago.exe、ffmpeg.exe 在同一目录，且没有被杀毒软件隔离。
 
+Q1.1：没有安装 Google Chrome，能否登录？
+A1.1：可以。1.3.4 会优先自动使用 Windows 自带的 Microsoft Edge，并兼容 Chrome。
+      其他 Chromium 内核浏览器会自动发现并尝试，但结果取决于具体版本。
+      自动检测不到时，按提示选择浏览器的 .exe 文件即可。
+      Firefox 不能用于自动登录，但完成有效登录后的下载阶段不依赖浏览器。
+
 Q2：提示“缺少 roomId 或 liveUuid 参数”怎么办？
      A2：这是直播解析器收到闪记或群文件链接的表现。升级到 1.3.3，粘贴完整的
     shanji 或 qr.dingtalk.com URL，不要手工拼接 roomId/liveUuid。
@@ -162,7 +176,7 @@ A3：登录会话不完整或已过期。点击“重新登录”，并确认同
 
 Q4：群文件提示“不支持 URL”？
 A4：旧版引擎可能没有注册 qr.dingtalk.com/page/yunpan 入口。确认 GUI 和
-     mediago.exe 均为 1.3.3 发布包中的版本，并保留 route、spaceId、fileId、type 参数。
+     mediago.exe 均为 1.3.4 发布包中的版本，并保留 route、spaceId、fileId、type 参数。
 
 Q5：群文件提示“没有可下载媒体”？
 A5：先用同一钉钉账号在客户端打开原链接。若客户端提示无权访问，请让文件所有者或群管理员授权，
@@ -201,7 +215,7 @@ A10：提交问题前请保留 GUI 日志中的错误类型和版本号，并删
 
 十、版本信息
 --------------------------------------------------------------------------------
-  图形界面：DingTalkDownloader 1.3.3
+  图形界面：DingTalkDownloader 1.3.4
   直播引擎：GoDingtalk v2.5.2（Windows amd64）
   群回放/闪记/钉盘媒体引擎：MediaGo v0.3.0（Windows amd64）
   转换组件：FFmpeg

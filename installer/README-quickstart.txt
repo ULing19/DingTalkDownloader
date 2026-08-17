@@ -4,7 +4,7 @@
 MediaGo: https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0
 
 1. 双击 DingTalkDownloader.exe
-2. 首次运行点击“重新登录”并完成钉钉授权
+2. 首次运行点击“重新登录”并完成钉钉授权；程序优先自动使用 Windows 自带的 Edge，不要求安装 Google Chrome
 3. 粘贴群回放、闪记或群文件链接
 4. 选择保存目录并点击“开始下载”
 
