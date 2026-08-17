@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.2.4'
+    [string]$Version = '1.3.2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +55,11 @@ try {
     $icon = Join-Path $root 'assets\download.ico'
     if (Test-Path -LiteralPath $icon -PathType Leaf) {
         Copy-ToPayloads -Source $icon -Name 'download.ico'
+    }
+
+    $websocketLicense = Join-Path $root 'WEBSOCKET_CLIENT_LICENSE.txt'
+    if (Test-Path -LiteralPath $websocketLicense -PathType Leaf) {
+        Copy-ToPayloads -Source $websocketLicense -Name 'WEBSOCKET_CLIENT_LICENSE.txt'
     }
 
     $ffmpegRoot = Join-Path $root 'ffmpeg_tmp\ffmpeg-9.0-essentials_build'

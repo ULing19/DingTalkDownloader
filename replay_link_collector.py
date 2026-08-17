@@ -31,6 +31,7 @@ DEFAULT_CUSTOMER_ROOT = Path(
     )
 )
 LINK_FILE_NAME = "链接集.txt"
+CID_RE = re.compile(r"[A-Za-z0-9_-]{1,160}")
 UUID_RE = re.compile(
     r"[?&]liveUuid=("
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
@@ -59,6 +60,78 @@ def load_settings(path: Optional[Path] = None) -> Dict[str, object]:
     if not isinstance(value, dict) or not isinstance(value.get("destinations"), dict):
         return {"destinations": {}}
     return value
+
+
+def list_remembered_groups(settings: Dict[str, object]) -> list[Dict[str, str]]:
+    """Return structurally valid remembered group destinations.
+
+    This is deliberately a pure, read-only projection of ``settings``.  It
+    does not resolve paths, inspect the file system, rewrite the mapping, or
+    remove stale entries.  The caller can therefore use it to populate a
+    selector and decide separately whether a remembered folder still exists.
+
+    Settings are normally loaded from JSON, but malformed in-memory values
+    are ignored as well.  CID keys are trimmed and de-duplicated
+    case-insensitively; the first candidate in a deterministic sort order is
+    retained.  ``path`` must be an absolute path ending in ``链接集.txt``;
+    the parent directory is intentionally not required to exist.
+    """
+
+    destinations = settings.get("destinations")
+    if not isinstance(destinations, dict):
+        return []
+
+    candidates: list[Dict[str, str]] = []
+    for raw_cid, raw_entry in destinations.items():
+        if not isinstance(raw_cid, str) or not isinstance(raw_entry, dict):
+            continue
+        cid = raw_cid.strip()
+        if not CID_RE.fullmatch(cid):
+            continue
+
+        raw_name = raw_entry.get("name", "")
+        if raw_name is None:
+            name = ""
+        elif isinstance(raw_name, str):
+            name = raw_name.strip()
+        else:
+            continue
+
+        raw_path = raw_entry.get("path")
+        if not isinstance(raw_path, str):
+            continue
+        path = raw_path.strip()
+        try:
+            path_value = Path(path)
+        except (OSError, TypeError, ValueError):
+            continue
+        if not path or not path_value.is_absolute() or path_value.name != LINK_FILE_NAME:
+            continue
+
+        label = f"{name} ({cid})" if name else f"群 {cid}"
+        candidates.append({"cid": cid, "name": name, "path": path, "label": label})
+
+    # Sort all fields, including their case-sensitive forms, so the selected
+    # duplicate is deterministic even when JSON insertion order differs.
+    candidates.sort(
+        key=lambda item: (
+            item["cid"].casefold(),
+            item["name"].casefold(),
+            item["path"].casefold(),
+            item["cid"],
+            item["name"],
+            item["path"],
+        )
+    )
+    groups: list[Dict[str, str]] = []
+    seen_cids: set[str] = set()
+    for item in candidates:
+        cid_key = item["cid"].casefold()
+        if cid_key in seen_cids:
+            continue
+        seen_cids.add(cid_key)
+        groups.append(item)
+    return groups
 
 
 def save_settings(settings: Dict[str, object], path: Optional[Path] = None) -> None:
@@ -139,6 +212,28 @@ def _valid_group_folder_name(name: Optional[str]) -> Optional[str]:
         return None
     if any(char in value for char in '<>:"/\\|?*'):
         return None
+    return value
+
+
+def safe_group_folder_name(name: Optional[str], cid: str) -> str:
+    """Return a readable, Windows-safe directory name for a discovered group."""
+
+    value = _valid_group_folder_name(name)
+    if value is None:
+        return f"群_{cid}"
+    # Keep room for the link file and avoid Windows' reserved device names.
+    value = value[:80].rstrip(". ")
+    if not value:
+        return f"群_{cid}"
+    if value.upper() in {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }:
+        return f"群_{value}"
     return value
 
 
@@ -484,10 +579,12 @@ if __name__ == "__main__":
 __all__ = [
     "CollectorApp",
     "discover_destination",
+    "list_remembered_groups",
     "load_settings",
     "main",
     "remember_customer_root",
     "remember_destination",
     "resolve_customer_root",
+    "safe_group_folder_name",
     "save_settings",
 ]

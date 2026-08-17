@@ -1,6 +1,6 @@
 # 第三方组件与来源说明
 
-本文件记录 1.2.4 发布包中随软件使用或再分发的主要组件。各组件仍由其原作者负责维护；本项目不把第三方组件的许可扩大为钉钉官方授权。
+本文件记录 1.3.2 发布包中随软件使用或再分发的主要组件。各组件仍由其原作者负责维护；本项目不把第三方组件的许可扩大为钉钉官方授权。
 
 ## GoDingtalk
 
@@ -38,18 +38,17 @@
 | Pillow | 图片读取和二维码预处理 | 以 PyPI/上游仓库当前许可证为准 |
 | opencv-python-headless | 二维码识别 | 以 PyPI/上游仓库当前许可证及其二进制依赖说明为准 |
 | pyzbar / ZBar | 遮挡二维码的备用识别 | pyzbar 0.1.9 按 MIT 发布；随 Windows wheel 提供的 ZBar 动态库按 LGPL-2.1 发布 |
+| websocket-client | 连接钉钉只读 LWP 回放列表接口 | Apache License 2.0 |
 
-发布包额外附带 `PYZBAR-LICENSE.txt`（pyzbar MIT）、`ZBAR-LICENSE.txt`（ZBar LGPL-2.1）和 `LIBICONV-NOTICE.txt`（随 pyzbar Windows wheel 一起分发的 libiconv 动态库来源与许可证说明）。ZBar 和 libiconv 仅作为二维码识别依赖，不属于钉钉官方 SDK。动态库保持独立文件随包分发，便于按 LGPL 条款替换或重新链接。
+发布包额外附带 `PYZBAR-LICENSE.txt`（pyzbar MIT）、`ZBAR-LICENSE.txt`（ZBar LGPL-2.1）、`LIBICONV-NOTICE.txt`（随 pyzbar Windows wheel 一起分发的 libiconv 动态库来源与许可证说明）和 `WEBSOCKET_CLIENT_LICENSE.txt`（Apache-2.0）。ZBar 和 libiconv 仅作为二维码识别依赖，不属于钉钉官方 SDK。动态库保持独立文件随包分发，便于按 LGPL 条款替换或重新链接。
 
 安装或再分发源码环境时，请保留各包的版权和许可证文件，不要把本项目 MIT 许可证套用到这些依赖。
 
-## Windows 与浏览器授权边界
+## Windows、浏览器授权与当前群链接采集器
 
-## 当前群链接采集器
-
-- `dingtalk_replay_extractor.py` 只读钉钉 CEF 日志和当前直播广场渲染进程的已提交可读内存，用于确认当前群和完整回放分页。
+- `dingtalk_replay_extractor.py` 从钉钉 CEF 日志识别当前群，优先使用登录态下的只读回放列表 RPC 自动翻页；旧版客户端或 RPC 不可用时，再回退读取当前直播广场渲染进程的已提交可读内存。
 - `replay_link_collector.py` 负责在用户选择的群资料目录下发现或记忆群目录，并通过原子写入保存 `链接集.txt`。
-- 采集器不注入进程、不模拟点击、不发送消息、不调用钉钉 RPC；页面或分页证据不完整时不会覆盖原文件。
+- 采集器不注入进程、不模拟点击、不发送消息；仅在本机登录态下调用前述回放列表只读 RPC，不调用写入类 RPC。页面或分页证据不完整时不会覆盖原文件。
 
 某些引擎可以使用用户明确提供的 Netscape Cookie 文件或浏览器授权状态。Cookie 属于账号凭据，不是第三方组件授权；本项目不会索取密码、代导出 Cookie 或绕过登录。发布问题日志前必须删除 Cookie、账号标识、私密 URL 参数和文件名。
 

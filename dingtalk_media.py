@@ -43,7 +43,7 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.2.4 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.3.2 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -84,6 +84,10 @@ _MIME_EXTENSIONS = {
     "image/png": ".png",
     "image/gif": ".gif",
 }
+
+# Multiple video workers may finish with the same title. Reserving the
+# ``.part`` name atomically prevents two tasks from selecting the same output.
+_OUTPUT_LOCK = threading.Lock()
 
 ProgressCallback = Callable[[str, float, str], None]
 
@@ -733,6 +737,29 @@ def _available_output(save_dir: Path, title: str, extension: str) -> Path:
     return candidate
 
 
+def _reserve_output(save_dir: Path, title: str, extension: str) -> Tuple[Path, Path]:
+    """Reserve a unique output by atomically creating its ``.part`` marker."""
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    with _OUTPUT_LOCK:
+        stem = _output_stem(title)
+        index = 0
+        while True:
+            suffix = "" if index == 0 else f" ({index})"
+            output = save_dir / f"{stem}{suffix}{extension}"
+            part = Path(str(output) + ".part")
+            if output.exists() or part.exists():
+                index += 1
+                continue
+            try:
+                fd = os.open(str(part), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                index += 1
+                continue
+            os.close(fd)
+            return output, part
+
+
 def _remove_file(path: Optional[Path]) -> None:
     if path is None:
         return
@@ -996,14 +1023,16 @@ def _run_ffmpeg(
     stop_event: Optional[threading.Event],
     local_playlist: bool,
 ) -> None:
+    # DingTalk screen shares may legally leave long gaps between video frames.
+    # Preserve source PTS so FFmpeg does not compress those gaps as discontinuities.
     command = [
         str(ffmpeg),
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
-        "-fflags",
-        "+genpts",
+        "-copyts",
+        "-start_at_zero",
         "-rw_timeout",
         "30000000",
     ]
@@ -1056,8 +1085,7 @@ def _download_playlist(
     cookies: Mapping[str, str],
 ) -> Path:
     extension = ".mp4"
-    output = _available_output(save_dir, private.title, extension)
-    part = Path(str(output) + ".part")
+    output, part = _reserve_output(save_dir, private.title, extension)
     temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
     try:
         if private.m3u8_content:
@@ -1123,8 +1151,7 @@ def _download_direct(
         except Exception:
             pass
         extension = _extension_for_media(private.title, content_type, candidate.url, candidate.format)
-        output = _available_output(save_dir, private.title, extension)
-        part = Path(str(output) + ".part")
+        output, part = _reserve_output(save_dir, private.title, extension)
         total = 0
         try:
             total = int(response.headers.get("Content-Length", "0") or 0)

@@ -16,11 +16,12 @@ import shutil
 import threading
 import subprocess
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Set
-from urllib.parse import urlparse, parse_qs
+from typing import Any, Dict, List, Optional, Set
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from dingtalk_media import (
     KIND_LIVE,
@@ -39,15 +40,24 @@ from dingtalk_replay_extractor import (
     ReplayExtractionError,
     ReplayExtractionResult,
     atomic_write_links,
-    extract_current_group_replays,
+    extract_open_group_replays,
+    find_open_group_renderers,
 )
 from replay_link_collector import (
     LINK_FILE_NAME,
-    discover_destination,
     load_settings,
     remember_customer_root,
-    remember_destination,
     resolve_customer_root,
+    safe_group_folder_name,
+)
+from updater import (
+    CURRENT_VERSION,
+    UpdateError,
+    download_asset,
+    fetch_latest_release,
+    is_newer_version,
+    launch_installer_update,
+    spawn_portable_update,
 )
 
 # ---------------------------------------------------------------------------
@@ -295,6 +305,20 @@ def compact_ui_text(value: str, limit: int) -> str:
     return text[: max(1, limit - 1)].rstrip() + "…"
 
 
+GROUP_CID_RE = re.compile(r"[A-Za-z0-9_-]{1,160}")
+
+
+def group_live_square_url(cid: str) -> str:
+    """Build the DingTalk live-square URL for a remembered group CID."""
+
+    value = str(cid or "").strip()
+    if not GROUP_CID_RE.fullmatch(value):
+        raise ValueError("群聊 ID 格式无效")
+    return "https://n.dingtalk.com/dingding/group-live/index.html?" + urlencode(
+        {"cid": value}
+    )
+
+
 # ---------------------------------------------------------------------------
 # 任务模型
 # ---------------------------------------------------------------------------
@@ -311,16 +335,48 @@ class TaskItem:
     total_seg: int = 0
     message: str = ""
     index: int = 0
+    group_name: str = ""
+    replay_title: str = ""
 
 
-def make_task_item(url: str, index: int) -> TaskItem:
+def make_task_item(
+    url: str,
+    index: int,
+    group_name: str = "",
+    replay_title: str = "",
+) -> TaskItem:
     info = classify_dingtalk_url(url)
     return TaskItem(
         url=url,
+        group_name=str(group_name or "").strip(),
+        replay_title=str(replay_title or "").strip(),
         kind=info.kind,
         kind_label=TASK_KIND_LABELS.get(info.kind, info.label),
         index=index,
     )
+
+
+def _task_output_title(task: TaskItem, title: str = "") -> str:
+    """Prefer the exact DingTalk replay title for the downloaded file."""
+
+    return (
+        str(task.replay_title or "").strip()
+        or str(title or "").strip()
+        or url_short_label(task.url)
+    )
+
+
+def _task_display_title(task: TaskItem, title: str = "") -> str:
+    """Show the discovered group in the task list without changing filenames."""
+
+    base = _task_output_title(task, title)
+    group = str(task.group_name or "").strip()
+    return f"{group} - {base}" if group else base
+
+
+def _safe_output_stem(value: str) -> str:
+    stem = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", str(value or "")).strip(" .")
+    return (stem or "钉钉媒体")[:180]
 
 
 @dataclass
@@ -349,6 +405,7 @@ class DownloadWorker(threading.Thread):
         thread_count: int,
         event_q: queue.Queue,
         stop_event: threading.Event,
+        video_workers: int = 1,
     ):
         super().__init__(daemon=True)
         self.godingtalk = godingtalk
@@ -360,8 +417,11 @@ class DownloadWorker(threading.Thread):
         self.thread_count = thread_count
         self.event_q = event_q
         self.stop_event = stop_event
+        self.video_workers = max(1, min(8, int(video_workers or 1)))
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
+        self._active_processes: Set[Any] = set()
+        self._output_lock = threading.Lock()
 
     def emit(self, kind: str, **payload):
         self.event_q.put({"kind": kind, **payload})
@@ -370,10 +430,17 @@ class DownloadWorker(threading.Thread):
         """停止当前 GoDingtalk 进程；MediaGo/FFmpeg 由 stop_event 负责。"""
         self.stop_event.set()
         with self._process_lock:
-            proc = self._current_process
-        if proc is not None and proc.poll() is None:
+            processes = list(self._active_processes)
+            if self._current_process is not None:
+                processes.append(self._current_process)
+        seen: Set[int] = set()
+        for proc in processes:
+            if id(proc) in seen:
+                continue
+            seen.add(id(proc))
             try:
-                proc.terminate()
+                if proc.poll() is None:
+                    proc.terminate()
             except Exception:
                 pass
 
@@ -381,55 +448,82 @@ class DownloadWorker(threading.Thread):
         with self._process_lock:
             self._current_process = proc
 
+    def _register_process(self, proc: Any) -> None:
+        with self._process_lock:
+            self._active_processes.add(proc)
+            self._current_process = proc
+
+    def _unregister_process(self, proc: Any) -> None:
+        with self._process_lock:
+            self._active_processes.discard(proc)
+            if self._current_process is proc:
+                self._current_process = next(iter(self._active_processes), None)
+
     def run(self):
         self.save_dir.mkdir(parents=True, exist_ok=True)
         total = len(self.tasks)
         done = 0
         warnings = 0
-        for i, task in enumerate(self.tasks):
-            if self.stop_event.is_set():
-                for j in range(i, total):
-                    self.emit("task_update", index=j, status="已取消", message="用户停止")
-                break
+        if not self.tasks:
+            self.emit("finished", done=0, total=0, warnings=0)
+            return
 
-            self.emit(
-                "task_update",
-                index=i,
-                status="解析中",
-                progress=0.0,
-                message=f"正在解析{task.kind_label}…",
-            )
-            self.emit("current", index=i)
-
-            ok, title, message, needs_check = self._run_one(i, task)
-            if self.stop_event.is_set():
-                self.emit("task_update", index=i, status="已取消", message="用户停止")
-                for j in range(i + 1, total):
-                    self.emit("task_update", index=j, status="已取消", message="用户停止")
-                break
-
-            if ok:
-                done += 1
-                if needs_check:
-                    warnings += 1
-                self.emit(
-                    "task_update",
-                    index=i,
-                    status="需检查" if needs_check else "完成",
-                    progress=100.0,
-                    title=title or task.title,
-                    message=message or "下载完成",
-                )
-            else:
-                self.emit(
-                    "task_update",
-                    index=i,
-                    status="失败",
-                    message=message or "未知错误",
-                )
-            self.emit("overall", done=done, total=total, warnings=warnings)
+        workers = min(self.video_workers, total)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dingtalk-video") as pool:
+            futures: Dict[Future, int] = {
+                pool.submit(self._run_task, index, task): index
+                for index, task in enumerate(self.tasks)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                task = self.tasks[index]
+                try:
+                    ok, title, message, needs_check = future.result()
+                except Exception:
+                    ok, title, message, needs_check = (
+                        False,
+                        "",
+                        "任务执行失败，请查看日志",
+                        False,
+                    )
+                if not ok and self.stop_event.is_set():
+                    self.emit("task_update", index=index, status="已取消", message="用户停止")
+                    continue
+                if ok:
+                    done += 1
+                    if needs_check:
+                        warnings += 1
+                    self.emit(
+                        "task_update",
+                        index=index,
+                        status="需检查" if needs_check else "完成",
+                        progress=100.0,
+                        title=title or task.title,
+                        message=message or "下载完成",
+                    )
+                else:
+                    self.emit(
+                        "task_update",
+                        index=index,
+                        status="失败",
+                        message=message or "未知错误",
+                    )
+                self.emit("overall", done=done, total=total, warnings=warnings)
 
         self.emit("finished", done=done, total=total, warnings=warnings)
+
+    def _run_task(self, index: int, task: TaskItem):
+        if self.stop_event.is_set():
+            return False, "", "用户停止", False
+        self.emit(
+            "task_update",
+            index=index,
+            status="解析中",
+            progress=0.0,
+            message=f"正在解析{task.kind_label}…",
+        )
+        self.emit("current", index=index)
+        return self._run_one(index, task)
 
     def _run_one(self, index: int, task: TaskItem):
         if task.kind == KIND_UNKNOWN:
@@ -458,14 +552,20 @@ class DownloadWorker(threading.Thread):
                     message="原始 HLS 链路不可用，正在尝试兼容引擎…",
                 )
             if self.godingtalk is not None and self.godingtalk.is_file():
-                ok, title, fallback_message = self._run_godingtalk(index, task.url)
+                godingtalk_task = (
+                    task if task.group_name or task.replay_title else task.url
+                )
+                ok, title, fallback_message = self._run_godingtalk(index, godingtalk_task)
                 if ok:
+                    fallback_warning = bool(
+                        fallback_message and fallback_message.startswith("已保存，但检测到")
+                    )
                     return (
                         True,
                         title,
                         fallback_message
                         or ("原始 HLS 链路不可用，已由兼容引擎完成" if media_error else ""),
-                        bool(fallback_message),
+                        fallback_warning,
                     )
                 if media_error:
                     return (
@@ -510,6 +610,7 @@ class DownloadWorker(threading.Thread):
                 stop_event=self.stop_event,
                 progress_cb=progress_callback,
             )
+            output = self._apply_group_name(output, task, title)
             return True, title, media_av_sync_warning(
                 output,
                 require_av=task.kind == KIND_LIVE,
@@ -519,18 +620,42 @@ class DownloadWorker(threading.Thread):
         except Exception:
             return False, "", "媒体下载失败，请稍后重试"
 
-    def _next_output_path(self, source: Path) -> Path:
+    def _next_output_path(self, source: Path, title: Optional[str] = None) -> Path:
         """Choose a non-destructive destination for an engine-produced file."""
-        stem = source.stem or "钉钉媒体"
+        stem = _safe_output_stem(title if title is not None else source.stem)
         suffix = source.suffix
         candidate = self.save_dir / source.name
+        if title is not None:
+            candidate = self.save_dir / f"{stem}{suffix}"
+        try:
+            if candidate.resolve() == source.resolve():
+                return source
+        except OSError:
+            pass
         index = 1
         while candidate.exists() or Path(str(candidate) + ".part").exists():
             candidate = self.save_dir / f"{stem} ({index}){suffix}"
             index += 1
         return candidate
 
-    def _promote_godingtalk_outputs(self, staging_dir: Path) -> List[Path]:
+    def _apply_group_name(self, source: Path, task: TaskItem, title: str = "") -> Path:
+        """Apply discovered DingTalk naming metadata without overwriting."""
+
+        group = str(task.group_name or "").strip()
+        replay_title = str(task.replay_title or "").strip()
+        if not (group or replay_title) or not source.is_file():
+            return source
+        grouped_title = _task_output_title(task, title or source.stem)
+        with self._output_lock:
+            destination = self._next_output_path(source, grouped_title)
+            if destination == source:
+                return source
+            shutil.move(str(source), str(destination))
+        return destination
+
+    def _promote_godingtalk_outputs(
+        self, staging_dir: Path, task: Optional[TaskItem] = None, title: str = ""
+    ) -> List[Path]:
         """Move one GoDingtalk result out of its private staging directory."""
         outputs = [
             path
@@ -539,15 +664,25 @@ class DownloadWorker(threading.Thread):
         ]
         moved: List[Path] = []
         for source in sorted(outputs):
-            destination = self._next_output_path(source)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source), str(destination))
+            # Reserve and move while holding the worker-wide lock. Parallel
+            # GoDingtalk processes must not select the same ``title.mp4``.
+            with self._output_lock:
+                grouped_title = (
+                    _task_output_title(task, title or source.stem)
+                    if task is not None and (task.group_name or task.replay_title)
+                    else None
+                )
+                destination = self._next_output_path(source, grouped_title)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
             moved.append(destination)
         return moved
 
-    def _run_godingtalk(self, index: int, url: str):
+    def _run_godingtalk(self, index: int, task_or_url: Any):
         if self.godingtalk is None:
             return False, "", "未找到 GoDingtalk 可执行文件"
+        task = task_or_url if isinstance(task_or_url, TaskItem) else None
+        url = task.url if task is not None else str(task_or_url)
         try:
             self.save_dir.mkdir(parents=True, exist_ok=True)
             staging_dir = Path(
@@ -591,7 +726,7 @@ class DownloadWorker(threading.Thread):
             shutil.rmtree(staging_dir, ignore_errors=True)
             return False, title, f"启动失败: {exc}"
 
-        self._set_current_process(proc)
+        self._register_process(proc)
         assert proc.stdout is not None
         buffer = ""
         try:
@@ -674,7 +809,7 @@ class DownloadWorker(threading.Thread):
             code = proc.wait()
             if code == 0:
                 try:
-                    moved = self._promote_godingtalk_outputs(staging_dir)
+                    moved = self._promote_godingtalk_outputs(staging_dir, task, title)
                 except OSError:
                     cleanup_staging = False
                     return (
@@ -692,7 +827,7 @@ class DownloadWorker(threading.Thread):
                 return True, title, warnings[0] if warnings else ""
             return False, title, last_err or f"进程退出码 {code}"
         finally:
-            self._set_current_process(None)
+            self._unregister_process(proc)
             if cleanup_staging:
                 shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -727,6 +862,8 @@ def build_gui():
     stop_event = threading.Event()
     worker: Optional[DownloadWorker] = None
     collector_running = False
+    url_group_names: Dict[str, str] = {}
+    url_replay_titles: Dict[str, str] = {}
 
     # ---------- 顶部工具栏 ----------
     top = ctk.CTkFrame(app, fg_color="transparent")
@@ -762,7 +899,7 @@ def build_gui():
 
     ctk.CTkLabel(conf, text="保存目录").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="w")
     save_var = ctk.StringVar(value=str(DEFAULT_SAVE))
-    save_entry = ctk.CTkEntry(conf, textvariable=save_var, width=420)
+    save_entry = ctk.CTkEntry(conf, textvariable=save_var, width=360)
     save_entry.grid(row=0, column=1, padx=4, pady=10, sticky="ew")
 
     def browse_save():
@@ -774,10 +911,15 @@ def build_gui():
         row=0, column=2, padx=4, pady=10
     )
 
-    ctk.CTkLabel(conf, text="线程数").grid(row=0, column=3, padx=(16, 6), pady=10)
+    ctk.CTkLabel(conf, text="分片线程").grid(row=0, column=3, padx=(16, 6), pady=10)
     thread_var = ctk.StringVar(value="10")
     thread_entry = ctk.CTkEntry(conf, textvariable=thread_var, width=60)
     thread_entry.grid(row=0, column=4, padx=4, pady=10)
+
+    ctk.CTkLabel(conf, text="同时下载").grid(row=0, column=5, padx=(16, 6), pady=10)
+    video_var = ctk.StringVar(value="2")
+    video_entry = ctk.CTkEntry(conf, textvariable=video_var, width=52)
+    video_entry.grid(row=0, column=6, padx=4, pady=10)
 
     conf.grid_columnconfigure(1, weight=1)
 
@@ -876,6 +1018,8 @@ def build_gui():
 
     def clear_input():
         textbox.delete("1.0", "end")
+        url_group_names.clear()
+        url_replay_titles.clear()
 
     ctk.CTkButton(btn_row, text="导入文本", command=import_txt, width=100).pack(
         side="left", padx=(0, 6)
@@ -892,19 +1036,19 @@ def build_gui():
         hover_color="#555",
     ).pack(side="left", padx=6)
 
-    collector_row = ctk.CTkFrame(left, fg_color="transparent")
-    collector_row.pack(fill="x", padx=12, pady=(0, 10))
+    group_action_row = ctk.CTkFrame(left, fg_color="transparent")
+    group_action_row.pack(fill="x", padx=12, pady=(0, 10))
     collector_btn = ctk.CTkButton(
-        collector_row,
-        text="获取当前群回放链接",
-        width=180,
+        group_action_row,
+        text="一键获取已打开群回放",
+        width=190,
         fg_color="#2f7d67",
         hover_color="#256653",
     )
     collector_btn.pack(side="left")
     ctk.CTkLabel(
-        collector_row,
-        text="先在钉钉打开目标群的直播广场",
+        group_action_row,
+        text="自动识别已加载群直播页，按群名保存",
         text_color="gray65",
         font=ctk.CTkFont(size=11),
     ).pack(side="left", padx=10)
@@ -955,7 +1099,7 @@ def build_gui():
             )
             kind_lbl.pack(side="left", padx=(2, 4))
 
-            name = compact_ui_text(t.title or url_short_label(t.url), 24)
+            name = compact_ui_text(_task_display_title(t, t.title), 24)
             name_lbl = ctk.CTkLabel(
                 top_r, text=name, anchor="w", font=ctk.CTkFont(size=13)
             )
@@ -996,7 +1140,7 @@ def build_gui():
             return
         t = state.tasks[i]
         w = row_widgets[i]
-        name = compact_ui_text(t.title or url_short_label(t.url), 24)
+        name = compact_ui_text(_task_display_title(t, t.title), 24)
         w["kind"].configure(
             text=t.kind_label,
             text_color="#8ab4f8" if t.kind != KIND_UNKNOWN else "#f07178",
@@ -1063,6 +1207,14 @@ def build_gui():
         fg_color="#3b82f6",
         hover_color="#2563eb",
     )
+    update_btn = ctk.CTkButton(
+        ctrl,
+        text="检查更新",
+        width=100,
+        height=36,
+        fg_color="#0f766e",
+        hover_color="#115e59",
+    )
 
     def open_project_link():
         try:
@@ -1073,19 +1225,166 @@ def build_gui():
         except Exception as exc:
             messagebox.showerror("打开链接失败", str(exc))
 
+    update_running = False
+
+    def _format_update_size(size: int) -> str:
+        if size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        return f"{max(1, size // 1024)} KB"
+
+    def _update_kind() -> str:
+        if not getattr(sys, "frozen", False):
+            return "Setup"
+        installed_marker = any(APP_DIR.glob("unins*.exe"))
+        return "Setup" if installed_marker else "Portable"
+
+    def _finish_update_download(asset_kind: str, downloaded: Path) -> None:
+        nonlocal update_running
+        try:
+            if asset_kind == "Setup":
+                launch_installer_update(downloaded)
+                log("更新安装包已校验并启动；安装程序将保留视频和登录配置。")
+                messagebox.showinfo("更新已启动", "安装程序已启动，关闭当前软件后按向导完成更新。")
+            else:
+                spawn_portable_update(
+                    downloaded,
+                    APP_DIR,
+                    application_exe=Path(sys.executable),
+                    wait_pid=os.getpid(),
+                )
+                log("绿色版更新已启动，程序退出后会自动替换文件并重启。")
+                messagebox.showinfo("更新已启动", "软件将退出并完成绿色版更新，完成后自动重启。")
+            app.after(300, app.destroy)
+        except (UpdateError, OSError) as exc:
+            update_running = False
+            update_btn.configure(state="normal", text="检查更新")
+            log(f"更新启动失败：{exc}")
+            messagebox.showerror("更新失败", str(exc))
+
+    def _download_update(info) -> None:
+        nonlocal update_running
+        asset_kind = _update_kind()
+        try:
+            asset = info.asset(asset_kind)
+        except UpdateError as exc:
+            update_running = False
+            update_btn.configure(state="normal", text="检查更新")
+            log(f"更新资产不可用：{exc}")
+            messagebox.showerror("更新失败", str(exc))
+            return
+
+        log(f"正在下载 v{info.version} {asset_kind}（{_format_update_size(asset.size)}）…")
+        last_percent = [-1]
+
+        def progress(done: int, total: int) -> None:
+            percent = int(done * 100 / max(1, total))
+            if percent >= last_percent[0] + 5 or percent == 100:
+                last_percent[0] = percent
+                app.after(0, lambda p=percent: update_btn.configure(text=f"更新 {p}%"))
+
+        def worker() -> None:
+            try:
+                downloaded = download_asset(asset, progress=progress)
+            except Exception as exc:
+                app.after(0, lambda error=exc: _update_download_failed(error))
+                return
+            app.after(0, lambda path=downloaded, kind=asset_kind: _finish_update_download(kind, path))
+
+        threading.Thread(target=worker, name="dingtalk-update-download", daemon=True).start()
+
+    def _update_download_failed(error: Exception) -> None:
+        nonlocal update_running
+        update_running = False
+        update_btn.configure(state="normal", text="检查更新")
+        log(f"更新下载失败：{error}")
+        messagebox.showerror("更新失败", str(error))
+
+    def check_updates(user_initiated: bool = True) -> None:
+        nonlocal update_running
+        if update_running:
+            return
+        if state.running:
+            log("下载任务进行中，已跳过更新检查。")
+            if user_initiated:
+                messagebox.showwarning("任务进行中", "请先完成或停止当前下载，再检查更新。")
+            return
+        update_running = True
+        update_btn.configure(state="disabled", text="检查中…")
+        log("正在检查 GitHub 最新版本…")
+
+        def worker() -> None:
+            try:
+                info = fetch_latest_release()
+            except Exception as exc:
+                app.after(0, lambda error=exc: _update_check_failed(error, user_initiated))
+                return
+            app.after(0, lambda release=info: _update_check_finished(release, user_initiated))
+
+        threading.Thread(target=worker, name="dingtalk-update-check", daemon=True).start()
+
+    def _update_check_failed(error: Exception, user_initiated: bool) -> None:
+        nonlocal update_running
+        update_running = False
+        update_btn.configure(state="normal", text="检查更新")
+        log(f"更新检查失败：{error}")
+        if user_initiated:
+            messagebox.showerror("检查更新失败", str(error))
+
+    def _update_check_finished(info, user_initiated: bool) -> None:
+        nonlocal update_running
+        update_running = False
+        update_btn.configure(state="normal", text="检查更新")
+        if not is_newer_version(info.version, CURRENT_VERSION):
+            log(f"当前已是最新版本 v{CURRENT_VERSION}。")
+            if user_initiated:
+                messagebox.showinfo("检查更新", f"当前已是最新版本 v{CURRENT_VERSION}。")
+            return
+        asset_kind = _update_kind()
+        try:
+            asset = info.asset(asset_kind)
+        except UpdateError as exc:
+            log(f"发现 v{info.version}，但更新资产不可用：{exc}")
+            if user_initiated:
+                messagebox.showerror("更新失败", str(exc))
+            return
+        summary = info.name or f"DingTalkDownloader v{info.version}"
+        prompt = (
+            f"发现新版本 v{info.version}：{summary}\n\n"
+            f"更新方式：{asset_kind}\n文件大小：{_format_update_size(asset.size)}\n\n"
+            "是否下载并更新？（下载前会校验 SHA-256）"
+        )
+        log(f"发现新版本 v{info.version}，可更新资产：{asset.name}")
+        if messagebox.askyesno("发现新版本", prompt):
+            update_running = True
+            update_btn.configure(state="disabled", text="准备更新…")
+            _download_update(info)
+
+    update_btn.configure(command=lambda: check_updates(True))
+
     start_btn.pack(side="left", padx=(0, 8))
     stop_btn.pack(side="left", padx=8)
     parse_btn.pack(side="left", padx=8)
     open_btn.pack(side="left", padx=8)
     login_btn.pack(side="right", padx=0)
     repo_btn.pack(side="right", padx=(8, 0))
+    update_btn.pack(side="right", padx=(8, 0))
 
     def parse_to_tasks():
         urls = extract_urls_from_text(textbox.get("1.0", "end"))
         if not urls:
             messagebox.showwarning("提示", "未找到有效的钉钉链接")
             return
-        state.tasks = [make_task_item(u, i) for i, u in enumerate(urls)]
+        url_group_names.intersection_update(urls)
+        url_replay_titles.intersection_update(urls)
+        state.tasks = [
+            make_task_item(
+                u,
+                i,
+                url_group_names.get(u, ""),
+                url_replay_titles.get(u, ""),
+            )
+            for i, u in enumerate(urls)
+        ]
         rebuild_task_rows()
         overall_lbl.configure(text=f"总进度: 0 / {len(state.tasks)}")
         overall_bar.set(0)
@@ -1098,7 +1397,7 @@ def build_gui():
 
     def _collector_error_message(error: Exception) -> str:
         if isinstance(error, DingTalkNotReadyError):
-            return "请先在钉钉打开目标群的直播广场，切换到“全部”并保持页面打开。"
+            return "请先在钉钉登录并打开需要采集的群直播页，切换到“全部”后重试。"
         if isinstance(error, IncompleteReplayListError):
             return str(error)
         if isinstance(error, ReplayExtractionError):
@@ -1110,88 +1409,111 @@ def build_gui():
         collector_running = False
         collector_btn.configure(state="normal")
         message = _collector_error_message(error)
-        log(f"当前群链接获取失败：{message}")
-        messagebox.showerror("获取当前群链接失败", message)
+        log(f"一键获取群链接失败：{message}")
+        messagebox.showerror("一键获取群链接失败", message)
 
-    def _collector_succeeded(result: ReplayExtractionResult) -> None:
+    def _auto_collection_finished(
+        results: List[ReplayExtractionResult], errors: List[str]
+    ) -> None:
         nonlocal collector_running
+        if not results:
+            collector_running = False
+            collector_btn.configure(state="normal")
+            detail = "\n".join(errors[:5]) if errors else "没有找到仍打开的群直播广场。"
+            log(f"一键采集未得到结果：{detail}")
+            messagebox.showerror("一键采集失败", detail)
+            return
+
         try:
             settings = load_settings(COLLECTOR_SETTINGS)
             initial_directory = resolve_customer_root(settings) or Path.home()
-            destination = discover_destination(
-                result,
-                settings,
-                None,
+            selected = filedialog.askdirectory(
+                parent=app,
+                title="选择已打开群回放的保存根目录",
+                initialdir=str(initial_directory),
+                mustexist=True,
             )
-            if destination is None:
+            if not selected:
+                raise ReplayExtractionError("已取消选择保存根目录，没有覆盖任何链接文件")
+            root_directory = remember_customer_root(
+                Path(selected),
+                settings,
+                settings_path=COLLECTOR_SETTINGS,
+            )
+
+            saved = 0
+            added = 0
+            used_names: Dict[str, str] = {}
+            for result in results:
+                folder_name = safe_group_folder_name(result.group_name, result.cid)
+                key = folder_name.casefold()
+                previous_cid = used_names.get(key)
+                if previous_cid and previous_cid != result.cid:
+                    folder_name = f"{folder_name}（{result.cid}）"
+                used_names[key] = result.cid
+                group_directory = root_directory / folder_name
+                group_directory.mkdir(parents=True, exist_ok=True)
+                destination = group_directory / LINK_FILE_NAME
+                atomic_write_links(destination, result.urls)
+                saved += 1
                 label = result.group_name or f"群 {result.cid}"
-                selected = filedialog.askdirectory(
-                    parent=app,
-                    title=f"选择“{label}”的保存文件夹",
-                    initialdir=str(initial_directory),
-                    mustexist=True,
-                )
-                if not selected:
-                    log("已取消选择保存位置，没有覆盖任何链接文件。")
-                    return
-                selected_directory = remember_customer_root(
-                    Path(selected),
-                    settings,
-                    settings_path=COLLECTOR_SETTINGS,
-                )
-                destination = selected_directory / LINK_FILE_NAME
+                for link in result.links:
+                    url_group_names[link.url] = label
+                    if link.title:
+                        url_replay_titles[link.url] = link.title
+                added += add_urls(result.urls, f"{label}回放")
+                log(f"已保存“{label}”的 {len(result.links)} 条链接：{destination}")
 
-            atomic_write_links(destination, result.urls)
-            remember_warning = ""
-            try:
-                remember_destination(
-                    result,
-                    destination,
-                    settings,
-                    settings_path=COLLECTOR_SETTINGS,
-                )
-            except Exception:
-                remember_warning = "；保存位置记忆失败，下次可能需要重新选择"
-
-            added = add_urls(result.urls, "当前群回放")
             parse_to_tasks()
-            label = result.group_name or f"群 {result.cid}"
+            collector_running = False
+            collector_btn.configure(state="normal")
+            error_hint = f"；另有 {len(errors)} 个群失败" if errors else ""
             log(
-                f"已获取“{label}”的 {len(result.links)} 个回放链接，"
-                f"新增 {added} 条，已保存到 {destination}{remember_warning}"
+                f"一键采集完成：成功 {saved} 个群、{sum(len(item.links) for item in results)} 条链接，"
+                f"新增任务 {added}{error_hint}。"
             )
             messagebox.showinfo(
-                "当前群链接",
-                f"已获取 {len(result.links)} 个回放链接，并加入任务列表。\n"
-                f"保存位置：{destination}",
+                "一键采集完成",
+                f"成功采集 {saved} 个群，共 {sum(len(item.links) for item in results)} 条回放链接。\n"
+                f"已按群名称保存到：{root_directory}"
+                + (f"\n有 {len(errors)} 个群未完成，请查看日志。" if errors else ""),
             )
         except Exception as exc:
             _collector_failed(exc)
-        finally:
-            collector_running = False
-            collector_btn.configure(state="normal")
 
-    def collect_current_group_links() -> None:
+    def auto_collect_open_groups() -> None:
         nonlocal collector_running
         if collector_running:
             return
         if state.running:
-            messagebox.showwarning("任务进行中", "请先停止当前下载任务，再获取新的群回放链接。")
+            messagebox.showwarning("任务进行中", "请先停止当前下载任务，再开始自动采集。")
             return
 
         collector_running = True
         collector_btn.configure(state="disabled")
-        log("正在只读检查当前钉钉直播广场，请保持目标群页面和末页打开…")
+        log("正在自动发现当前登录态中已加载的群直播页；不会切换群聊或修改钉钉内容…")
 
         def worker() -> None:
+            results: List[ReplayExtractionResult] = []
+            errors: List[str] = []
             try:
-                result = extract_current_group_replays()
+                targets = find_open_group_renderers()
             except Exception as exc:
-                app.after(0, lambda error=exc: _collector_failed(error))
+                app.after(0, lambda error=exc: _auto_collection_finished([], [str(error)]))
                 return
-            app.after(0, lambda: _collector_succeeded(result))
 
-        threading.Thread(target=worker, daemon=True).start()
+            seen_cids: Set[str] = set()
+            for target in targets:
+                if target.cid in seen_cids:
+                    continue
+                seen_cids.add(target.cid)
+                try:
+                    results.append(extract_open_group_replays(target))
+                except Exception as exc:
+                    errors.append(f"群 {target.cid}：{exc}")
+            app.after(0, lambda: _auto_collection_finished(results, errors))
+
+        threading.Thread(target=worker, name="dingtalk-auto-collector", daemon=True).start()
 
     def open_save_dir():
         d = Path(save_var.get() or DEFAULT_SAVE)
@@ -1218,13 +1540,24 @@ def build_gui():
         nonlocal worker
         if state.running:
             return
+        if update_running:
+            messagebox.showwarning("正在检查更新", "请等待更新检查或下载完成后再开始任务。")
+            return
 
         urls = extract_urls_from_text(textbox.get("1.0", "end"))
         if not urls:
             messagebox.showwarning("提示", "请先输入或导入钉钉链接")
             return
 
-        tasks = [make_task_item(u, i) for i, u in enumerate(urls)]
+        tasks = [
+            make_task_item(
+                u,
+                i,
+                url_group_names.get(u, ""),
+                url_replay_titles.get(u, ""),
+            )
+            for i, u in enumerate(urls)
+        ]
         unknown_count = sum(1 for task in tasks if task.kind == KIND_UNKNOWN)
         if unknown_count:
             messagebox.showerror(
@@ -1277,6 +1610,12 @@ def build_gui():
             threads = 10
             thread_var.set("10")
 
+        try:
+            video_workers = max(1, min(8, int(video_var.get().strip() or "2")))
+        except ValueError:
+            video_workers = 2
+            video_var.set("2")
+
         save_dir = Path(save_var.get().strip() or str(DEFAULT_SAVE))
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1305,6 +1644,7 @@ def build_gui():
             thread_count=threads,
             event_q=event_q,
             stop_event=stop_event,
+            video_workers=video_workers,
         )
         worker.start()
 
@@ -1387,13 +1727,13 @@ def build_gui():
     open_btn.configure(command=open_save_dir)
     login_btn.configure(command=do_login)
     repo_btn.configure(command=open_project_link)
-    collector_btn.configure(command=collect_current_group_links)
+    collector_btn.configure(command=auto_collect_open_groups)
 
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
     log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
     log(
-        f"当前群链接获取后会保存到所选群文件夹的 {LINK_FILE_NAME}；"
-        "每个群都可以使用不同保存位置。"
+        f"一键获取会自动识别已加载群直播页，按群名称保存 {LINK_FILE_NAME}；"
+        "不会依赖已记忆群映射。"
     )
     if not exe_path:
         log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")
@@ -1411,6 +1751,9 @@ def build_gui():
     if sample.exists():
         log(f"提示: 可导入 {sample}")
 
+    log(f"当前版本：v{CURRENT_VERSION}；可点击“检查更新”获取 GitHub 新版。")
+    app.after(3500, lambda: check_updates(False))
+
     poll_events()
     app.mainloop()
 
@@ -1418,6 +1761,10 @@ def build_gui():
 def main():
     # 确保工作目录在程序旁，便于相对路径
     os.chdir(APP_DIR)
+    if "--apply-portable" in sys.argv:
+        from updater import main as updater_main
+
+        raise SystemExit(updater_main(sys.argv[1:]))
     try:
         import customtkinter  # noqa: F401
         import cv2  # noqa: F401

@@ -10,19 +10,22 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import dingtalk_replay_extractor as extractor
+from dingtalk_rpc import RpcReplayRecord
 from dingtalk_replay_extractor import (
     IncompleteReplayListError,
     ReplayExtractionError,
     atomic_write_links,
     extract_current_group_replays,
+    find_open_group_renderers,
     find_current_renderer,
     parse_memory_chunks,
 )
 
 
-CID = "73984109056"
-UUID_1 = "78aae103-f05a-433e-a962-787965719d28"
-UUID_2 = "2aba1850-33fe-4001-b026-895d060be1f4"
+CID = "10000000001"
+UUID_1 = "00000001-1111-4111-8111-000000000001"
+UUID_2 = "00000002-1111-4111-8111-000000000002"
 
 
 def uuid_for(number: int) -> str:
@@ -71,7 +74,7 @@ def response(records, is_end: int) -> str:
 def page_context(*parts: str) -> bytes:
     prefix = (
         f'https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}'
-        f'{{"id":"{CID}","title":"27级英语刷题"}}'
+        f'{{"id":"{CID}","title":"示例学习群"}}'
     )
     return (prefix + "".join(parts)).encode("utf-8")
 
@@ -96,16 +99,13 @@ def terminal_payload(*request_indexes: int, cid: str = CID) -> bytes:
 
 
 class ReplayExtractorTests(unittest.TestCase):
-    def test_renderer_selection_skips_newer_closed_page(self):
+    def test_new_navigation_log_query_order_and_event_name(self):
         with tempfile.TemporaryDirectory() as root:
-            log_path = Path(root) / "cef_debug.log.test"
+            log_path = Path(root) / "cef_debug.log.new"
             log_path.write_text(
-                "[111:1:0815/12:00:00.000:ERROR] "
-                "Navigation.RendererCommitReceive url:"
-                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
-                "[222:1:0815/12:01:00.000:ERROR] "
-                "Navigation.RendererCommitReceive url:"
-                "https://n.dingtalk.com/dingding/group-live/index.html?cid=70016024645\n",
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted "
+                "url:https://n.dingtalk.com/dingding/group-live/index.html?tab=all&"
+                f"conversationId={CID}&page=1\n",
                 encoding="utf-8",
             )
             with mock.patch(
@@ -115,6 +115,180 @@ class ReplayExtractorTests(unittest.TestCase):
                 target = find_current_renderer(Path(root))
         self.assertEqual(target.pid, 111)
         self.assertEqual(target.cid, CID)
+
+    def test_group_name_comes_from_groupsetting_navigation(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.new"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[222:1:0815/12:00:01.000:ERROR] Navigation.LoadCommitted url:"
+                "app://desktop.dingtalk.com/web_content/groupsetting.html?"
+                f"cid={CID}&title=%E6%B5%8B%E8%AF%95%E7%BE%A4%E8%81%8A\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive",
+                side_effect=lambda pid: pid == 111,
+            ):
+                target = find_current_renderer(Path(root))
+        self.assertEqual(target.group_name, "测试群聊")
+
+    def test_new_response_wrapper_and_record_aliases(self):
+        live_id = uuid_for(91)
+        record_value = {
+            "conversationId": CID,
+            "liveUUID": live_id,
+            "roomId": "newRoom",
+            "liveUrl": (
+                "https://n.dingtalk.com/dingding/live-room/index.htm?"
+                f"liveUuid={live_id}&extra=1&roomId=newRoom"
+            ),
+            "shareUrl": (
+                "https://h5.dingtalk.com/group-live-share/index.html?"
+                f"liveUuid={live_id}&encCid=abc123"
+            ),
+            "startTime": 1001,
+        }
+        payload = (
+            f"https://n.dingtalk.com/dingding/group-live/index.html?tab=all&conversationId={CID}"
+            + json.dumps(
+                {"pageSize": 10, "pageNo": 1, "cid": CID, "ok": True, "keyword": ""},
+                separators=(",", ":"),
+            )
+            + json.dumps(
+                {"ok": True, "data": {"hasMore": "false", "records": [record_value]}},
+                separators=(",", ":"),
+            )
+        ).encode("utf-8")
+        result = parse_memory_chunks([payload], cid=CID)
+        self.assertEqual(len(result.links), 1)
+        self.assertEqual(result.links[0].room_id, "newRoom")
+        self.assertEqual(result.links[0].live_uuid, live_id)
+
+    def test_group_name_prefers_group_metadata_over_replay_title(self):
+        payload = page_context(
+            request(0),
+            response([record(CID, "roomOne", UUID_1, 1000, "abc123")], 1),
+        )
+        result = parse_memory_chunks([payload], cid=CID)
+        self.assertEqual(result.group_name, "示例学习群")
+        self.assertEqual(result.links[0].title, "lesson-1000")
+
+    def test_structured_record_preserves_live_title_alias(self):
+        record_value = record(CID, "roomOne", UUID_1, 1000, "abc123")
+        del record_value["title"]
+        record_value["liveTitle"] = "  钉钉群内的回放标题  "
+        payload = page_context(request(0), response([record_value], 1))
+
+        result = parse_memory_chunks([payload], cid=CID)
+
+        self.assertEqual(result.links[0].title, "钉钉群内的回放标题")
+
+    def test_groupsetting_navigation_supplies_group_name(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted "
+                "url:app://desktop.dingtalk.com/web_content/groupsetting.html?"
+                f"cid={CID}&title=%E6%B5%8B%E8%AF%95%E7%BE%A4\n"
+                "[111:1:0815/12:01:00.000:ERROR] Navigation.LoadCommitted "
+                f"url:https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive",
+                side_effect=lambda pid: pid == 111,
+            ):
+                targets = find_open_group_renderers(Path(root))
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].group_name, "测试群")
+
+    def test_stale_group_page_marker_does_not_block_target(self):
+        target = page_context(
+            request(0),
+            response([record(CID, "roomOne", UUID_1, 1000, "abc123")], 1),
+        )
+        stale = (
+            b"https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000002"
+        )
+        result = parse_memory_chunks([stale + target], cid=CID)
+        self.assertEqual(len(result.links), 1)
+
+    def test_renderer_selection_skips_newer_closed_page(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] "
+                "Navigation.RendererCommitReceive url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[222:1:0815/12:01:00.000:ERROR] "
+                "Navigation.RendererCommitReceive url:"
+                "https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000002\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive",
+                side_effect=lambda pid: pid == 111,
+            ):
+                target = find_current_renderer(Path(root))
+        self.assertEqual(target.pid, 111)
+        self.assertEqual(target.cid, CID)
+
+    def test_renderer_selection_honors_expected_group_cid(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[222:1:0815/12:01:00.000:ERROR] Navigation.LoadCommitted url:"
+                "https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000002\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive",
+                side_effect=lambda pid: pid in {111, 222},
+            ):
+                target = find_current_renderer(Path(root), expected_cid=CID)
+        self.assertEqual(target.pid, 111)
+        self.assertEqual(target.cid, CID)
+
+    def test_open_group_renderer_discovery_deduplicates_live_pages(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[111:1:0815/12:01:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[222:1:0815/12:02:00.000:ERROR] Navigation.LoadCommitted url:"
+                "https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000002\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive",
+                side_effect=lambda pid: pid in {111, 222},
+            ):
+                targets = find_open_group_renderers(Path(root))
+        self.assertEqual([(item.pid, item.cid) for item in targets], [(222, "10000000002"), (111, CID)])
+
+    def test_open_group_renderer_uses_only_latest_navigation_per_pid(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[111:1:0815/12:01:00.000:ERROR] Navigation.LoadCommitted url:"
+                "https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000002\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive", return_value=True
+            ):
+                targets = find_open_group_renderers(Path(root))
+                with self.assertRaises(extractor.DingTalkNotReadyError):
+                    find_current_renderer(Path(root), expected_cid=CID)
+        self.assertEqual([(item.pid, item.cid) for item in targets], [(111, "10000000002")])
 
     @unittest.skipUnless(os.name == "nt", "Windows process memory integration test")
     def test_real_read_only_process_memory_scan(self):
@@ -152,7 +326,7 @@ class ReplayExtractorTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows process memory integration test")
     def test_real_fallback_scan_supports_an_arbitrary_group(self):
-        arbitrary_cid = "81234567890"
+        arbitrary_cid = "10000000003"
         payload_parts = [
             (
                 "https://n.dingtalk.com/dingding/group-live/index.html?"
@@ -204,15 +378,15 @@ class ReplayExtractorTests(unittest.TestCase):
                 ],
                 1,
             ),
-            request(0, cid="70016024645"),
+            request(0, cid="10000000002"),
             response(
-                [record("70016024645", "otherRoom", other_uuid, 4000000000000, "other")],
+                [record("10000000002", "otherRoom", other_uuid, 4000000000000, "other")],
                 1,
             ),
         )
         result = parse_memory_chunks([payload], cid=CID, pid=123)
         self.assertEqual(result.pid, 123)
-        self.assertEqual(result.group_name, "27级英语刷题")
+        self.assertEqual(result.group_name, "示例学习群")
         self.assertEqual([item.live_uuid for item in result.links], [UUID_2, UUID_1])
         self.assertNotIn(other_uuid, "\n".join(result.urls))
         self.assertTrue(all(url.startswith("https://n.dingtalk.com/") for url in result.urls))
@@ -354,6 +528,68 @@ class ReplayExtractorTests(unittest.TestCase):
         result = parse_memory_chunks(parts, cid=CID)
         self.assertEqual(len(result.links), 52)
 
+    def test_fallback_confirmation_accepts_structured_second_scan(self):
+        """A renderer may expose URL pairs first and parsed pages on reread."""
+        target = mock.Mock(pid=12345, cid=CID, group_name=None)
+        records = url_pair_records(12)
+        first = url_pair_payload(records, 10)
+        second = page_context(
+            request(0),
+            response(records[:10], 0),
+            request(10),
+            response(records[10:], 1),
+        )
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer",
+            side_effect=[target, target],
+        ), mock.patch(
+            "dingtalk_replay_extractor._dingtalk_parent_process_id",
+            return_value=None,
+        ), mock.patch(
+            "dingtalk_replay_extractor.iter_process_memory_chunks",
+            side_effect=[[first], [second]],
+        ), mock.patch("dingtalk_replay_extractor.time.sleep"):
+            result = extract_current_group_replays()
+        self.assertEqual(len(result.links), 12)
+        self.assertEqual(set(result.urls), {item["jumpUrl"] for item in records})
+
+    def test_fallback_confirmation_retries_until_third_scan_stabilizes(self):
+        target = mock.Mock(pid=12345, cid=CID, group_name=None)
+        records = url_pair_records(12)
+        changed_a = url_pair_payload(url_pair_records(13), 10)
+        changed_b = url_pair_payload(url_pair_records(14), 10)
+        stable = url_pair_payload(records, 10)
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer",
+            side_effect=[target, target, target, target],
+        ), mock.patch(
+            "dingtalk_replay_extractor._dingtalk_parent_process_id",
+            return_value=None,
+        ), mock.patch(
+            "dingtalk_replay_extractor.iter_process_memory_chunks",
+            side_effect=[[url_pair_payload(records, 10)], [changed_a], [changed_b], [stable]],
+        ), mock.patch("dingtalk_replay_extractor.time.sleep") as sleep:
+            result = extract_current_group_replays()
+        self.assertEqual(len(result.links), 12)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_fallback_confirmation_reports_unstable_after_bounded_retries(self):
+        target = mock.Mock(pid=12345, cid=CID, group_name=None)
+        records = url_pair_records(12)
+        changed = [url_pair_payload(url_pair_records(13 + index), 10) for index in range(3)]
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer",
+            side_effect=[target, target, target, target],
+        ), mock.patch(
+            "dingtalk_replay_extractor._dingtalk_parent_process_id",
+            return_value=None,
+        ), mock.patch(
+            "dingtalk_replay_extractor.iter_process_memory_chunks",
+            side_effect=[[url_pair_payload(records, 10)], *([[item] for item in changed])],
+        ), mock.patch("dingtalk_replay_extractor.time.sleep"):
+            with self.assertRaisesRegex(IncompleteReplayListError, "回放列表仍在变化"):
+                extract_current_group_replays()
+
     def test_url_pair_fallback_rejects_without_terminal_evidence(self):
         records = [
             json.dumps(
@@ -416,7 +652,7 @@ class ReplayExtractorTests(unittest.TestCase):
         records = url_pair_records(52)
         records[0]["jumpUrl"] = (
             "https://n.dingtalk.com/dingding/live-room/index.html?"
-            f"roomId=room1&cid=70016024645&liveUuid={uuid_for(1)}"
+            f"roomId=room1&cid=10000000002&liveUuid={uuid_for(1)}"
         )
         with self.assertRaises(IncompleteReplayListError):
             parse_memory_chunks(
@@ -518,6 +754,50 @@ class ReplayExtractorTests(unittest.TestCase):
                 [page_context(request(0, openId="user-open-id"), response(records, 1))],
                 cid=CID,
             )
+
+    def test_read_only_rpc_records_become_titled_replay_links(self):
+        target = extractor.RendererTarget(
+            pid=123,
+            cid=CID,
+            log_path=Path("cef_debug.log"),
+            group_name="测试群",
+        )
+        records = (
+            RpcReplayRecord(CID, "roomOne", UUID_1, "第一讲", 1000),
+            RpcReplayRecord(CID, "roomTwo", UUID_2, "第二讲", 2000),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            cookies = Path(root) / "cookies.json"
+            cookies.write_text("{}", encoding="utf-8")
+            with mock.patch("dingtalk_rpc.list_live_records", return_value=records):
+                result = extractor._extract_replays_via_rpc(target, cookies)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.cid, CID)
+        self.assertEqual(result.group_name, "测试群")
+        self.assertEqual([item.title for item in result.links], ["第二讲", "第一讲"])
+        self.assertEqual([item.room_id for item in result.links], ["roomTwo", "roomOne"])
+
+    def test_current_group_prefers_rpc_without_scanning_process_memory(self):
+        target = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
+        rpc_result = extractor.ReplayExtractionResult(
+            pid=123,
+            cid=CID,
+            group_name=None,
+            links=(extractor.ReplayLink(UUID_1, "roomOne", 1, 1, "第一讲"),),
+        )
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer", return_value=target
+        ), mock.patch(
+            "dingtalk_replay_extractor._extract_replays_via_rpc", return_value=rpc_result
+        ), mock.patch(
+            "dingtalk_replay_extractor._extract_replays_from_target"
+        ) as memory_scan:
+            result = extract_current_group_replays(cookies_path=Path("cookies.json"))
+
+        self.assertEqual(result, rpc_result)
+        memory_scan.assert_not_called()
 
     def test_atomic_writer_keeps_one_link_per_line(self):
         url_1 = (

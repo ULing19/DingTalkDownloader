@@ -113,8 +113,9 @@ class DingtalkMediaTests(unittest.TestCase):
                 )
 
             command = popen.call_args.args[0]
-            self.assertLess(command.index("-fflags"), command.index("-i"))
-            self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
+            self.assertLess(command.index("-copyts"), command.index("-i"))
+            self.assertLess(command.index("-start_at_zero"), command.index("-i"))
+            self.assertNotIn("+genpts", command)
             self.assertEqual(command[command.index("-rw_timeout") + 1], "30000000")
             self.assertIn("-protocol_whitelist", command)
             self.assertIn("0:v:0?", command)

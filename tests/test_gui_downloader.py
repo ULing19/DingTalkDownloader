@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import tempfile
 import threading
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -12,6 +13,49 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_worker_runs_multiple_video_tasks_concurrently(self):
+        tasks = [
+            gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid="
+                f"0000000{index}-1111-4111-8111-00000000000{index}",
+                index - 1,
+            )
+            for index in (1, 2)
+        ]
+        worker = gui.DownloadWorker(
+            godingtalk=None,
+            mediago=None,
+            ffmpeg=None,
+            tasks=tasks,
+            save_dir=Path("."),
+            cookies=Path("cookies.json"),
+            thread_count=4,
+            event_q=queue.Queue(),
+            stop_event=threading.Event(),
+            video_workers=2,
+        )
+        active = 0
+        maximum = 0
+        state_lock = threading.Lock()
+
+        def fake_run(_index, _task):
+            nonlocal active, maximum
+            with state_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.08)
+            with state_lock:
+                active -= 1
+            return True, "并发测试", "", False
+
+        with mock.patch.object(worker, "_run_one", side_effect=fake_run):
+            worker.run()
+        self.assertGreaterEqual(maximum, 2)
+        events = []
+        while not worker.event_q.empty():
+            events.append(worker.event_q.get_nowait())
+        finished = [event for event in events if event["kind"] == "finished"]
+        self.assertEqual(finished[-1]["done"], 2)
     def test_extracts_markdown_and_plain_dingtalk_urls(self):
         text = """
         [闪记](https://shanji.dingtalk.com/app/transcribes/demo_123)
@@ -31,6 +75,19 @@ class GuiDownloaderTests(unittest.TestCase):
         ]
         tasks = [gui.make_task_item(url, index) for index, url in enumerate(urls)]
         self.assertEqual([task.kind_label for task in tasks], ["群回放", "闪记", "群文件"])
+
+    def test_replay_title_is_preserved_for_exact_output_naming(self):
+        url = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=room&liveUuid=00000000-0000-0000-0000-000000000001"
+        )
+        task = gui.make_task_item(url, 0, "示例群", "钉钉回放标题")
+        self.assertEqual(task.group_name, "示例群")
+        self.assertEqual(task.replay_title, "钉钉回放标题")
+        self.assertEqual(gui._task_output_title(task, "引擎返回的标题"), "钉钉回放标题")
+        self.assertEqual(gui._task_display_title(task, "引擎返回的标题"), "示例群 - 钉钉回放标题")
+        fallback_task = gui.make_task_item(url, 1, "示例群")
+        self.assertEqual(gui._task_output_title(fallback_task, "引擎返回的标题"), "引擎返回的标题")
 
     def test_worker_routes_live_and_media_tasks_to_mediago_first(self):
         with tempfile.TemporaryDirectory() as root:
@@ -425,10 +482,161 @@ class GuiDownloaderTests(unittest.TestCase):
             ):
                 self.assertEqual(worker._run_mediago(0, task), (True, "课程", "视频轨异常"))
 
+    def test_auto_collected_replay_title_names_mediago_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            output = root_path / "out" / "课程.mp4"
+            mediago.write_bytes(b"placeholder")
+            ffmpeg.write_bytes(b"placeholder")
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"video")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=mediago,
+                ffmpeg=ffmpeg,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://shanji.dingtalk.com/app/transcribes/demo_123",
+                0,
+                "物理一班",
+                "群内:课程标题",
+            )
+            with mock.patch.object(
+                gui, "download_resolved", return_value=("课程", output)
+            ), mock.patch.object(gui, "media_av_sync_warning", return_value=""):
+                self.assertEqual(worker._run_mediago(0, task), (True, "课程", ""))
+            self.assertTrue((root_path / "out" / "群内_课程标题.mp4").is_file())
+
+    def test_preferred_replay_titles_are_numbered_when_they_collide(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "out"
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=output,
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+                "物理一班",
+                "同名回放",
+            )
+            for index in (1, 2):
+                staging = root_path / f"staging-{index}"
+                staging.mkdir()
+                (staging / "engine-title.mp4").write_bytes(b"video")
+                worker._promote_godingtalk_outputs(staging, task, "引擎标题")
+
+            self.assertEqual(
+                sorted(path.name for path in output.glob("*.mp4")),
+                ["同名回放 (1).mp4", "同名回放.mp4"],
+            )
+
+    def test_preferred_replay_title_keeps_engine_file_when_already_named(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "out"
+            output.mkdir()
+            source = output / "同名回放.mp4"
+            source.write_bytes(b"video")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=output,
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+                "物理一班",
+                "同名回放",
+            )
+
+            self.assertEqual(worker._apply_group_name(source, task, "同名回放"), source)
+            self.assertEqual([path.name for path in output.glob("*.mp4")], ["同名回放.mp4"])
+
+    def test_auto_collected_replay_title_names_godingtalk_output(self):
+        class FakeProcess:
+            def __init__(self, output_dir):
+                Path(output_dir, "dingtalk_random.mp4").write_bytes(b"video")
+                self.stdout = StringIO("标题: 课程\n下载成功\n")
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            godingtalk.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+                "物理一班",
+                "群内课程标题",
+            )
+
+            def fake_popen(command, **_kwargs):
+                return FakeProcess(command[command.index("-saveDir") + 1])
+
+            with mock.patch.object(gui.subprocess, "Popen", side_effect=fake_popen), mock.patch.object(
+                gui, "media_av_sync_warning", return_value=""
+            ):
+                self.assertTrue(worker._run_godingtalk(0, task)[0])
+            self.assertTrue((root_path / "out" / "群内课程标题.mp4").is_file())
+
     def test_compact_ui_text_prevents_long_row_content(self):
         rendered = gui.compact_ui_text("x" * 100, 24)
         self.assertEqual(len(rendered), 24)
         self.assertTrue(rendered.endswith("…"))
+
+    def test_group_live_square_url_uses_selected_cid(self):
+        self.assertEqual(
+            gui.group_live_square_url("10000000001"),
+            "https://n.dingtalk.com/dingding/group-live/index.html?cid=10000000001",
+        )
+        with self.assertRaises(ValueError):
+            gui.group_live_square_url("cid with spaces")
 
     def test_collector_path_guard_stays_inside_customer_root(self):
         with tempfile.TemporaryDirectory() as root:

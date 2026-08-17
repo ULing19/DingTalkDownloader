@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.2.4
+# DingTalkDownloader release version: 1.3.2
 import os
 
 from PyInstaller.utils.hooks import collect_all
@@ -7,7 +7,15 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 
 datas = [('assets\\download.ico', 'assets')]
 binaries = []
-hiddenimports = ['PIL', 'PIL._tkinter_finder', 'cv2']
+hiddenimports = [
+    'PIL',
+    'PIL._tkinter_finder',
+    'cv2',
+    'dingtalk_rpc',
+    'websocket',
+    'websocket._abnf',
+    'websocket._core',
+]
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('darkdetect')
