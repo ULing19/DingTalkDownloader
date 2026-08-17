@@ -67,6 +67,10 @@ RESPONSE_START_RE = re.compile(
     rb'"(?:records|items|list|data|result|payload)"\s*:',
     re.IGNORECASE,
 )
+REPLAY_RECORD_START_RE = re.compile(
+    rb'"(?:liveUuid|liveUUID|liveId|uuid)"\s*:',
+    re.IGNORECASE,
+)
 
 # Newer DingTalk builds have used extra query parameters, ``.htm`` routes and
 # a different navigation log label. Keep a broad URL candidate scan as a
@@ -101,10 +105,7 @@ def _group_page_cid(url: str) -> Optional[str]:
         path = (parsed.path or "").lower()
         if not host.endswith(".dingtalk.com"):
             return None
-        is_group_setting = host == "desktop.dingtalk.com" and path.endswith(
-            "/groupsetting.html"
-        )
-        if "group-live" not in path and "live-square" not in path and not is_group_setting:
+        if "group-live" not in path and "live-square" not in path:
             return None
         query = parse_qs(parsed.query, keep_blank_values=True)
         for key in ("cid", "conversationId", "groupId", "chatId"):
@@ -347,8 +348,10 @@ class _MemoryEvidence:
     )
     canonical_rooms: Dict[str, Set[str]] = field(default_factory=dict)
     public_enc_cids: Dict[str, Set[str]] = field(default_factory=dict)
+    record_titles: Dict[str, Set[str]] = field(default_factory=dict)
     discovery_order: Dict[str, int] = field(default_factory=dict)
     invalid_target_page_seen: bool = False
+    filtered_request_errors: List[str] = field(default_factory=list)
 
 
 def _normalize_json_bytes(data: bytes) -> bytes:
@@ -609,7 +612,13 @@ def _collect_memory_evidence(chunks: Iterable[bytes], cid: str) -> _MemoryEviden
         evidence.names.update(_extract_group_names(data, cid))
 
         for request_value in _iter_json_objects(data, FINISHED_REQUEST_START_RE):
-            request_index = _parse_finished_request(request_value, cid)
+            try:
+                request_index = _parse_finished_request(request_value, cid)
+            except IncompleteReplayListError as exc:
+                message = str(exc)
+                if message not in evidence.filtered_request_errors:
+                    evidence.filtered_request_errors.append(message)
+                continue
             if request_index is not None:
                 evidence.request_indexes.add(request_index)
 
@@ -629,6 +638,16 @@ def _collect_memory_evidence(chunks: Iterable[bytes], cid: str) -> _MemoryEviden
                 tuple((record.live_uuid, record.room_id) for record in page.records),
             )
             evidence.pages[signature] = page
+
+        # Older clients may expose validated replay records in the heap but
+        # omit the structured list response. Preserve an unambiguous title so
+        # the URL-pair fallback can still use the DingTalk name.
+        for record_value in _iter_json_objects(data, REPLAY_RECORD_START_RE):
+            record = _parse_replay_record(record_value, cid)
+            if record is not None and record.title:
+                evidence.record_titles.setdefault(record.live_uuid, set()).add(
+                    record.title
+                )
 
         for match in DINGTALK_URL_BYTES_RE.finditer(data):
             raw_url = match.group(0).decode("utf-8", "ignore")
@@ -761,6 +780,11 @@ def _url_fallback_result(
             room_id=next(iter(evidence.canonical_rooms[live_uuid])),
             timestamp=0,
             discovery_order=index,
+            title=(
+                next(iter(evidence.record_titles[live_uuid]))
+                if len(evidence.record_titles.get(live_uuid, set())) == 1
+                else None
+            ),
         )
         for index, live_uuid in enumerate(ordered_uuids, start=1)
     )
@@ -794,7 +818,13 @@ def _parse_memory_chunks_with_mode(
     # Newer clients keep stale/preloaded group pages in the renderer heap. URL
     # and record parsers still require every verifiable item to match ``cid``;
     # stale page markers alone must not make an otherwise valid target fail.
+    if evidence.request_indexes and evidence.filtered_request_errors:
+        raise IncompleteReplayListError(
+            "检测到“全部”和筛选请求混合，无法确认当前列表，原文件未改动"
+        )
     if not evidence.request_indexes:
+        if evidence.filtered_request_errors:
+            raise IncompleteReplayListError(evidence.filtered_request_errors[0])
         raise IncompleteReplayListError("未找到已结束回放的分页请求，原文件未改动")
     # A renderer can retain names from previously visited groups. The name is
     # only a convenience for choosing a folder, never proof of link ownership;
@@ -976,17 +1006,18 @@ def find_current_renderer(
         except OSError:
             continue
         for line in reversed(lines):
-            match = LOG_NAV_RE.search(line)
+            match = LOG_NAV_ANY_RE.search(line)
             if not match:
                 continue
-            navigation_seen = True
             pid = int(match.group("pid"))
+            cid = _group_page_cid(match.group("url"))
+            if cid:
+                navigation_seen = True
             if pid in seen_pids:
                 continue
             # A CEF renderer can be reused for another group or page. Only
             # its newest navigation represents what is still open now.
             seen_pids.add(pid)
-            cid = _group_page_cid(match.group("url"))
             if not cid:
                 continue
             if expected_cid and cid != str(expected_cid):
@@ -1030,16 +1061,16 @@ def find_open_group_renderers(log_dir: Optional[Path] = None) -> Tuple[RendererT
         except OSError:
             continue
         for line in reversed(lines):
-            match = LOG_NAV_RE.search(line)
+            match = LOG_NAV_ANY_RE.search(line)
             if not match:
                 continue
             pid = int(match.group("pid"))
+            cid = _group_page_cid(match.group("url"))
             if pid in seen_pids:
                 continue
             # Do not resurrect an older group from a renderer whose newest
             # navigation has already moved elsewhere.
             seen_pids.add(pid)
-            cid = _group_page_cid(match.group("url"))
             if not cid:
                 continue
             if not _is_process_alive(pid):
@@ -1175,6 +1206,30 @@ def iter_process_memory_chunks(
         kernel32.CloseHandle(handle)
 
 
+def _discover_group_name_from_processes(target: RendererTarget) -> Optional[str]:
+    """Read a single unambiguous group name from the open DingTalk processes."""
+
+    if target.group_name:
+        return target.group_name
+    candidate_pids = [target.pid]
+    parent_pid = _dingtalk_parent_process_id(target.pid)
+    if parent_pid is not None and parent_pid not in candidate_pids:
+        candidate_pids.append(parent_pid)
+
+    names: Set[str] = set()
+    for pid in candidate_pids:
+        try:
+            for chunk in iter_process_memory_chunks(pid):
+                names.update(_extract_group_names(chunk, target.cid))
+                if len(names) > 1:
+                    return None
+        except ReplayExtractionError:
+            # The group name is optional metadata. Link extraction still has
+            # its own strict process/RPC validation and error reporting.
+            continue
+    return next(iter(names), None) if len(names) == 1 else None
+
+
 def _extract_replays_from_target(
     target: RendererTarget,
     log_dir: Optional[Path] = None,
@@ -1307,8 +1362,11 @@ def extract_current_group_replays(
     result = _extract_replays_via_rpc(target, cookies_path)
     if result is None:
         result = _extract_replays_from_target(target, log_dir, expected_cid)
-    if not result.group_name and target.group_name:
-        result = replace(result, group_name=target.group_name)
+    group_name = result.group_name or target.group_name
+    if not group_name:
+        group_name = _discover_group_name_from_processes(target)
+    if not result.group_name and group_name:
+        result = replace(result, group_name=group_name)
     return result
 
 
@@ -1317,19 +1375,20 @@ def extract_open_group_replays(
     log_dir: Optional[Path] = None,
     cookies_path: Optional[Path] = None,
 ) -> ReplayExtractionResult:
-    """Extract one already-open group page after rechecking its CID/PID.
+    """Extract one already-open group page after rechecking its CID.
 
     The recheck prevents a stale navigation entry from being treated as the
-    selected group after DingTalk reused the same renderer for another page.
+    selected group while allowing DingTalk to restart its renderer mid-scan.
     """
 
     confirmed = find_current_renderer(log_dir, expected_cid=target.cid)
-    if confirmed.pid != target.pid:
-        raise IncompleteReplayListError("群直播页面已切换，请保持目标群页面打开后重试")
     result = _extract_replays_via_rpc(confirmed, cookies_path)
     if result is None:
         result = _extract_replays_from_target(confirmed, log_dir, target.cid)
-    group_name = result.group_name or target.group_name or confirmed.group_name
+    group_name = result.group_name or confirmed.group_name
+    if not group_name:
+        group_name = _discover_group_name_from_processes(confirmed)
+    group_name = group_name or target.group_name
     if not result.group_name and group_name:
         result = replace(result, group_name=group_name)
     return result

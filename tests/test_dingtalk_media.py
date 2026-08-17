@@ -258,6 +258,20 @@ class DingtalkMediaTests(unittest.TestCase):
                 self.assertNotIn("bad", text)
             self.assertFalse(cookie_path.exists())
 
+    def test_title_dots_do_not_become_media_extensions(self):
+        self.assertEqual(
+            media._extension_for_media("Python 3.10", "", "", "mp4"),
+            ".mp4",
+        )
+        self.assertEqual(
+            media._extension_for_media("2026.08.17", "video/mp4", "", "bin"),
+            ".mp4",
+        )
+        self.assertEqual(
+            media._extension_for_media("课件.pdf", "", "", "pdf"),
+            ".pdf",
+        )
+
     def test_find_mediago_checks_app_directory_before_path(self):
         with tempfile.TemporaryDirectory() as root:
             executable = Path(root) / "mediago.exe"

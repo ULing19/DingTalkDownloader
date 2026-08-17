@@ -290,6 +290,23 @@ class ReplayExtractorTests(unittest.TestCase):
                     find_current_renderer(Path(root), expected_cid=CID)
         self.assertEqual([(item.pid, item.cid) for item in targets], [(111, "10000000002")])
 
+    def test_open_group_renderer_does_not_resurrect_page_after_non_http_navigation(self):
+        with tempfile.TemporaryDirectory() as root:
+            log_path = Path(root) / "cef_debug.log.test"
+            log_path.write_text(
+                "[111:1:0815/12:00:00.000:ERROR] Navigation.LoadCommitted url:"
+                f"https://n.dingtalk.com/dingding/group-live/index.html?cid={CID}\n"
+                "[111:1:0815/12:01:00.000:ERROR] Navigation.LoadCommitted url:about:blank\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "dingtalk_replay_extractor._is_process_alive", return_value=True
+            ):
+                with self.assertRaises(extractor.DingTalkNotReadyError):
+                    find_open_group_renderers(Path(root))
+                with self.assertRaises(extractor.DingTalkNotReadyError):
+                    find_current_renderer(Path(root), expected_cid=CID)
+
     @unittest.skipUnless(os.name == "nt", "Windows process memory integration test")
     def test_real_read_only_process_memory_scan(self):
         payload = page_context(
@@ -517,6 +534,10 @@ class ReplayExtractorTests(unittest.TestCase):
         self.assertEqual(
             {(item.live_uuid, item.room_id) for item in result.links},
             {(uuid_for(number), f"room{number}") for number in range(1, 53)},
+        )
+        self.assertEqual(
+            {item.title for item in result.links},
+            {f"lesson-{1000 + number}" for number in range(1, 53)},
         )
 
     def test_url_pair_fallback_accepts_fixed_uuid_before_heap_bytes(self):
@@ -755,6 +776,17 @@ class ReplayExtractorTests(unittest.TestCase):
                 cid=CID,
             )
 
+    def test_mixed_filter_requests_fail_closed_without_request_correlation(self):
+        records = [record(CID, "roomOne", UUID_1, 1000000000000, "abc123")]
+        payload = page_context(
+            request(0, openId="stale-user-open-id"),
+            request(0),
+            response(records, 1),
+        )
+
+        with self.assertRaisesRegex(IncompleteReplayListError, "请求混合"):
+            parse_memory_chunks([payload], cid=CID)
+
     def test_read_only_rpc_records_become_titled_replay_links(self):
         target = extractor.RendererTarget(
             pid=123,
@@ -779,7 +811,7 @@ class ReplayExtractorTests(unittest.TestCase):
         self.assertEqual([item.title for item in result.links], ["第二讲", "第一讲"])
         self.assertEqual([item.room_id for item in result.links], ["roomTwo", "roomOne"])
 
-    def test_current_group_prefers_rpc_without_scanning_process_memory(self):
+    def test_current_group_prefers_rpc_and_adds_process_group_name(self):
         target = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
         rpc_result = extractor.ReplayExtractionResult(
             pid=123,
@@ -794,10 +826,89 @@ class ReplayExtractorTests(unittest.TestCase):
         ), mock.patch(
             "dingtalk_replay_extractor._extract_replays_from_target"
         ) as memory_scan:
-            result = extract_current_group_replays(cookies_path=Path("cookies.json"))
+            with mock.patch(
+                "dingtalk_replay_extractor._discover_group_name_from_processes",
+                return_value="测试群",
+            ):
+                result = extract_current_group_replays(cookies_path=Path("cookies.json"))
+
+        self.assertEqual(result.group_name, "测试群")
+        self.assertEqual(result.links, rpc_result.links)
+        memory_scan.assert_not_called()
+
+    def test_open_group_accepts_same_cid_after_renderer_restart(self):
+        original = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
+        restarted = extractor.RendererTarget(456, CID, Path("cef_debug.log"))
+        rpc_result = extractor.ReplayExtractionResult(
+            pid=456,
+            cid=CID,
+            group_name="测试群",
+            links=(extractor.ReplayLink(UUID_1, "roomOne", 1, 1, "第一讲"),),
+        )
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer", return_value=restarted
+        ), mock.patch(
+            "dingtalk_replay_extractor._extract_replays_via_rpc", return_value=rpc_result
+        ), mock.patch(
+            "dingtalk_replay_extractor._extract_replays_from_target"
+        ) as memory_scan:
+            result = extractor.extract_open_group_replays(original)
 
         self.assertEqual(result, rpc_result)
         memory_scan.assert_not_called()
+
+    def test_open_group_renderer_restart_prefers_newly_discovered_group_name(self):
+        original = extractor.RendererTarget(
+            123, CID, Path("cef_debug.log"), group_name="旧群名"
+        )
+        restarted = extractor.RendererTarget(456, CID, Path("cef_debug.log"))
+        rpc_result = extractor.ReplayExtractionResult(
+            pid=456,
+            cid=CID,
+            group_name=None,
+            links=(extractor.ReplayLink(UUID_1, "roomOne", 1, 1, "第一讲"),),
+        )
+        with mock.patch(
+            "dingtalk_replay_extractor.find_current_renderer", return_value=restarted
+        ), mock.patch(
+            "dingtalk_replay_extractor._extract_replays_via_rpc", return_value=rpc_result
+        ), mock.patch(
+            "dingtalk_replay_extractor._discover_group_name_from_processes",
+            return_value="新群名",
+        ):
+            result = extractor.extract_open_group_replays(original)
+
+        self.assertEqual(result.group_name, "新群名")
+
+    def test_group_name_discovery_uses_parent_process_metadata(self):
+        target = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
+        parent_payload = json.dumps(
+            {"id": CID, "conversationName": "新版群名称"}, ensure_ascii=False
+        ).encode("utf-8")
+        with mock.patch(
+            "dingtalk_replay_extractor._dingtalk_parent_process_id", return_value=456
+        ), mock.patch(
+            "dingtalk_replay_extractor.iter_process_memory_chunks",
+            side_effect=lambda pid: iter([parent_payload]) if pid == 456 else iter([b""]),
+        ):
+            name = extractor._discover_group_name_from_processes(target)
+
+        self.assertEqual(name, "新版群名称")
+
+    def test_group_name_discovery_rejects_ambiguous_metadata(self):
+        target = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
+        payloads = [
+            json.dumps({"id": CID, "name": name}, ensure_ascii=False).encode("utf-8")
+            for name in ("群名称一", "群名称二")
+        ]
+        with mock.patch(
+            "dingtalk_replay_extractor._dingtalk_parent_process_id", return_value=None
+        ), mock.patch(
+            "dingtalk_replay_extractor.iter_process_memory_chunks", return_value=iter(payloads)
+        ):
+            name = extractor._discover_group_name_from_processes(target)
+
+        self.assertIsNone(name)
 
     def test_atomic_writer_keeps_one_link_per_line(self):
         url_1 = (

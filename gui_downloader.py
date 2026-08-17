@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -20,7 +21,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from dingtalk_media import (
@@ -33,6 +34,7 @@ from dingtalk_media import (
     download_resolved,
     find_mediago,
     media_av_sync_warning,
+    safe_output_stem,
 )
 from dingtalk_replay_extractor import (
     DingTalkNotReadyError,
@@ -49,6 +51,7 @@ from replay_link_collector import (
     remember_customer_root,
     resolve_customer_root,
     safe_group_folder_name,
+    save_settings,
 )
 from updater import (
     CURRENT_VERSION,
@@ -87,6 +90,7 @@ COLLECTOR_SETTINGS = (
     / "DingTalkReplayLinkCollector"
     / "settings.json"
 )
+MAX_REPLAY_METADATA = 5000
 
 
 def _resource_path(relative: str) -> Path:
@@ -374,9 +378,116 @@ def _task_display_title(task: TaskItem, title: str = "") -> str:
     return f"{group} - {base}" if group else base
 
 
-def _safe_output_stem(value: str) -> str:
-    stem = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", str(value or "")).strip(" .")
-    return (stem or "钉钉媒体")[:180]
+def _retain_url_metadata(
+    urls: Iterable[str], *metadata_maps: Dict[str, str]
+) -> None:
+    """Drop metadata for removed URLs while preserving current replay titles."""
+
+    current_urls = {str(url) for url in urls}
+    for metadata in metadata_maps:
+        for url in tuple(metadata):
+            if url not in current_urls:
+                metadata.pop(url, None)
+
+
+def _replay_metadata_key(url: str) -> str:
+    digest = hashlib.sha256(str(url).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _replay_metadata_maps(
+    settings: Dict[str, object], urls: Iterable[str] = (),
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Resolve hashed local metadata for the supplied replay URLs."""
+
+    group_names: Dict[str, str] = {}
+    replay_titles: Dict[str, str] = {}
+    raw_metadata = settings.get("replay_metadata")
+    if not isinstance(raw_metadata, dict):
+        return group_names, replay_titles
+    for raw_url in dict.fromkeys(str(item or "").strip() for item in urls):
+        if not raw_url or classify_dingtalk_url(raw_url).kind != KIND_LIVE:
+            continue
+        raw_item = raw_metadata.get(_replay_metadata_key(raw_url))
+        if not isinstance(raw_item, dict):
+            # Read old plaintext-key settings once. A later collection save
+            # rewrites current entries under non-reversible hash keys.
+            raw_item = raw_metadata.get(raw_url)
+        if not isinstance(raw_item, dict):
+            continue
+        group_name = str(raw_item.get("group_name") or "").strip()
+        replay_title = str(raw_item.get("replay_title") or "").strip()
+        if group_name and len(group_name) <= 256:
+            group_names[raw_url] = group_name
+        if replay_title and len(replay_title) <= 512:
+            replay_titles[raw_url] = replay_title
+    return group_names, replay_titles
+
+
+def _hydrate_replay_metadata(
+    settings: Dict[str, object],
+    urls: Iterable[str],
+    group_names: Dict[str, str],
+    replay_titles: Dict[str, str],
+) -> None:
+    """Merge persisted live metadata into the current in-memory maps."""
+
+    current_urls = list(urls)
+    cached_groups, cached_titles = _replay_metadata_maps(settings, current_urls)
+    for url, value in cached_groups.items():
+        group_names.setdefault(url, value)
+    for url, value in cached_titles.items():
+        replay_titles.setdefault(url, value)
+    _retain_url_metadata(current_urls, group_names, replay_titles)
+
+
+def _remember_replay_metadata(
+    settings: Dict[str, object],
+    group_names: Dict[str, str],
+    replay_titles: Dict[str, str],
+) -> int:
+    """Merge current replay metadata into the bounded local settings cache."""
+
+    metadata: Dict[str, Dict[str, str]] = {}
+    raw_metadata = settings.get("replay_metadata")
+    if isinstance(raw_metadata, dict):
+        for raw_key, raw_item in list(raw_metadata.items())[-MAX_REPLAY_METADATA:]:
+            key = str(raw_key or "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", key) or not isinstance(raw_item, dict):
+                continue
+            group_name = str(raw_item.get("group_name") or "").strip()
+            replay_title = str(raw_item.get("replay_title") or "").strip()
+            item: Dict[str, str] = {}
+            if group_name and len(group_name) <= 256:
+                item["group_name"] = group_name
+            if replay_title and len(replay_title) <= 512:
+                item["replay_title"] = replay_title
+            if item:
+                metadata[key] = item
+
+    ordered_urls = list(dict.fromkeys([*group_names, *replay_titles]))
+    for url in ordered_urls:
+        if classify_dingtalk_url(url).kind != KIND_LIVE:
+            continue
+        key = _replay_metadata_key(url)
+        previous = metadata.pop(key, {})
+        group_name = str(group_names.get(url) or previous.get("group_name") or "").strip()
+        replay_title = str(replay_titles.get(url) or previous.get("replay_title") or "").strip()
+        item: Dict[str, str] = {}
+        if group_name and len(group_name) <= 256:
+            item["group_name"] = group_name
+        if replay_title and len(replay_title) <= 512:
+            item["replay_title"] = replay_title
+        if item:
+            metadata[key] = item
+    if len(metadata) > MAX_REPLAY_METADATA:
+        metadata = dict(list(metadata.items())[-MAX_REPLAY_METADATA:])
+    settings["replay_metadata"] = metadata
+    return len(metadata)
+
+
+def _safe_output_stem(value: str, output_extension: str = "") -> str:
+    return safe_output_stem(str(value or ""), output_extension)
 
 
 @dataclass
@@ -622,21 +733,26 @@ class DownloadWorker(threading.Thread):
 
     def _next_output_path(self, source: Path, title: Optional[str] = None) -> Path:
         """Choose a non-destructive destination for an engine-produced file."""
-        stem = _safe_output_stem(title if title is not None else source.stem)
         suffix = source.suffix
-        candidate = self.save_dir / source.name
-        if title is not None:
-            candidate = self.save_dir / f"{stem}{suffix}"
-        try:
-            if candidate.resolve() == source.resolve():
-                return source
-        except OSError:
-            pass
-        index = 1
-        while candidate.exists() or Path(str(candidate) + ".part").exists():
-            candidate = self.save_dir / f"{stem} ({index}){suffix}"
+        stem = _safe_output_stem(
+            title if title is not None else source.stem,
+            suffix,
+        )
+        index = 0
+        while True:
+            if title is None and index == 0:
+                candidate = self.save_dir / source.name
+            else:
+                numbered = stem if index == 0 else f"{stem} ({index})"
+                candidate = self.save_dir / f"{numbered}{suffix}"
+            try:
+                if candidate.resolve() == source.resolve():
+                    return source
+            except OSError:
+                pass
+            if not candidate.exists() and not Path(str(candidate) + ".part").exists():
+                return candidate
             index += 1
-        return candidate
 
     def _apply_group_name(self, source: Path, task: TaskItem, title: str = "") -> Path:
         """Apply discovered DingTalk naming metadata without overwriting."""
@@ -956,9 +1072,7 @@ def build_gui():
     btn_row.pack(fill="x", padx=12, pady=10)
 
     def add_urls(urls: List[str], source: str = "") -> int:
-        existing = {t.url for t in state.tasks}
-        # 文本框里已有的也算
-        existing |= set(extract_urls_from_text(textbox.get("1.0", "end")))
+        existing = set(extract_urls_from_text(textbox.get("1.0", "end")))
         added = 0
         lines_to_append = []
         for u in urls:
@@ -1018,8 +1132,6 @@ def build_gui():
 
     def clear_input():
         textbox.delete("1.0", "end")
-        url_group_names.clear()
-        url_replay_titles.clear()
 
     ctk.CTkButton(btn_row, text="导入文本", command=import_txt, width=100).pack(
         side="left", padx=(0, 6)
@@ -1374,8 +1486,12 @@ def build_gui():
         if not urls:
             messagebox.showwarning("提示", "未找到有效的钉钉链接")
             return
-        url_group_names.intersection_update(urls)
-        url_replay_titles.intersection_update(urls)
+        _hydrate_replay_metadata(
+            load_settings(COLLECTOR_SETTINGS),
+            urls,
+            url_group_names,
+            url_replay_titles,
+        )
         state.tasks = [
             make_task_item(
                 u,
@@ -1402,14 +1518,14 @@ def build_gui():
             return str(error)
         if isinstance(error, ReplayExtractionError):
             return str(error)
-        return "读取当前群失败，请确认钉钉页面已打开后重试。"
+        return "程序处理采集结果时发生错误，请重试；若仍出现请反馈日志时间。"
 
     def _collector_failed(error: Exception) -> None:
         nonlocal collector_running
         collector_running = False
         collector_btn.configure(state="normal")
         message = _collector_error_message(error)
-        log(f"一键获取群链接失败：{message}")
+        log(f"一键获取群链接失败：{message}（{type(error).__name__}）")
         messagebox.showerror("一键获取群链接失败", message)
 
     def _auto_collection_finished(
@@ -1464,6 +1580,8 @@ def build_gui():
                 added += add_urls(result.urls, f"{label}回放")
                 log(f"已保存“{label}”的 {len(result.links)} 条链接：{destination}")
 
+            _remember_replay_metadata(settings, url_group_names, url_replay_titles)
+            save_settings(settings, COLLECTOR_SETTINGS)
             parse_to_tasks()
             collector_running = False
             collector_btn.configure(state="normal")
@@ -1548,6 +1666,16 @@ def build_gui():
         if not urls:
             messagebox.showwarning("提示", "请先输入或导入钉钉链接")
             return
+
+        # Users may restart the GUI and click "开始下载" directly, without
+        # pressing "解析到任务列表" first. Restore cached group/title metadata
+        # so that direct starts keep the same names as the collection flow.
+        _hydrate_replay_metadata(
+            load_settings(COLLECTOR_SETTINGS),
+            urls,
+            url_group_names,
+            url_replay_titles,
+        )
 
         tasks = [
             make_task_item(
@@ -1688,7 +1816,7 @@ def build_gui():
                         t = state.tasks[i]
                         log(
                             f"[{i+1}/{len(state.tasks)}] {t.kind_label}: "
-                            f"{t.title or url_short_label(t.url)}"
+                            f"{_task_display_title(t, t.title)}"
                         )
                 elif kind == "finished":
                     state.running = False

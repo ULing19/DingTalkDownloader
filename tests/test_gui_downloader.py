@@ -89,6 +89,121 @@ class GuiDownloaderTests(unittest.TestCase):
         fallback_task = gui.make_task_item(url, 1, "示例群")
         self.assertEqual(gui._task_output_title(fallback_task, "引擎返回的标题"), "引擎返回的标题")
 
+    def test_retain_url_metadata_preserves_current_titles_and_removes_stale_urls(self):
+        current = "https://n.dingtalk.com/dingding/live-room/index.html?roomId=a&liveUuid=1"
+        stale = "https://n.dingtalk.com/dingding/live-room/index.html?roomId=b&liveUuid=2"
+        group_names = {current: "当前群", stale: "旧群"}
+        replay_titles = {current: "钉钉原标题", stale: "旧标题"}
+
+        gui._retain_url_metadata([current], group_names, replay_titles)
+
+        self.assertEqual(group_names, {current: "当前群"})
+        self.assertEqual(replay_titles, {current: "钉钉原标题"})
+
+    def test_replay_metadata_survives_settings_round_trip(self):
+        url = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=room&liveUuid=00000000-0000-0000-0000-000000000001"
+        )
+        settings = {"destinations": {}}
+
+        count = gui._remember_replay_metadata(
+            settings, {url: "当前群"}, {url: "钉钉原标题"}
+        )
+        group_names, replay_titles = gui._replay_metadata_maps(settings, [url])
+
+        self.assertEqual(count, 1)
+        self.assertEqual(group_names, {url: "当前群"})
+        self.assertEqual(replay_titles, {url: "钉钉原标题"})
+        self.assertNotIn(url, settings["replay_metadata"])
+        self.assertTrue(
+            all(key.startswith("sha256:") for key in settings["replay_metadata"])
+        )
+
+    def test_hydrate_replay_metadata_preserves_current_values_and_loads_cache(self):
+        current = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=room&liveUuid=00000000-0000-0000-0000-000000000001"
+        )
+        stale = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=stale&liveUuid=00000000-0000-0000-0000-000000000002"
+        )
+        settings = {"destinations": {}}
+        gui._remember_replay_metadata(
+            settings, {current: "缓存群"}, {current: "缓存原标题"}
+        )
+        groups = {current: "本次群名", stale: "旧群"}
+        titles = {stale: "旧标题"}
+
+        gui._hydrate_replay_metadata(settings, [current], groups, titles)
+
+        self.assertEqual(groups, {current: "本次群名"})
+        self.assertEqual(titles, {current: "缓存原标题"})
+
+    def test_replay_metadata_refresh_moves_entry_after_lru_cutoff(self):
+        urls = [
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            f"roomId=room{index}&liveUuid=00000000-0000-0000-0000-00000000000{index}"
+            for index in range(1, 4)
+        ]
+        settings = {"destinations": {}}
+        with mock.patch.object(gui, "MAX_REPLAY_METADATA", 2):
+            gui._remember_replay_metadata(
+                settings,
+                {},
+                {urls[0]: "标题一", urls[1]: "标题二"},
+            )
+            gui._remember_replay_metadata(
+                settings,
+                {},
+                {urls[0]: "标题一（刷新）", urls[2]: "标题三"},
+            )
+            _, replay_titles = gui._replay_metadata_maps(settings, urls)
+
+        self.assertEqual(
+            replay_titles,
+            {urls[0]: "标题一（刷新）", urls[2]: "标题三"},
+        )
+
+    def test_output_stem_removes_media_suffix_and_guards_reserved_names(self):
+        self.assertEqual(gui._safe_output_stem("课程.mp4"), "课程")
+        self.assertEqual(gui._safe_output_stem("CON.mp4"), "_CON")
+        self.assertEqual(gui._safe_output_stem("LPT1"), "_LPT1")
+        self.assertEqual(gui._safe_output_stem("Python 3.10"), "Python 3.10")
+        self.assertEqual(gui._safe_output_stem("2026.08.17"), "2026.08.17")
+        self.assertEqual(gui._safe_output_stem("资料.pdf", ".mp4"), "资料.pdf")
+        self.assertEqual(gui._safe_output_stem("资料.pdf", ".pdf"), "资料")
+
+    def test_preferred_title_with_other_suffix_is_preserved(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "out"
+            output.mkdir()
+            source = output / "engine.mp4"
+            source.write_bytes(b"video")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=output,
+                cookies=root_path / "cookies.json",
+                thread_count=1,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+                "示例群",
+                "资料.pdf",
+            )
+
+            destination = worker._apply_group_name(source, task, "引擎标题")
+
+            self.assertEqual(destination.name, "资料.pdf.mp4")
+
     def test_worker_routes_live_and_media_tasks_to_mediago_first(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
@@ -574,6 +689,38 @@ class GuiDownloaderTests(unittest.TestCase):
 
             self.assertEqual(worker._apply_group_name(source, task, "同名回放"), source)
             self.assertEqual([path.name for path in output.glob("*.mp4")], ["同名回放.mp4"])
+
+    def test_preferred_replay_title_keeps_engine_numbered_collision_name(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "out"
+            output.mkdir()
+            (output / "同名回放.mp4").write_bytes(b"first")
+            source = output / "同名回放 (1).mp4"
+            source.write_bytes(b"second")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=output,
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            task = gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?roomId=r&liveUuid=u",
+                0,
+                "示例群",
+                "同名回放",
+            )
+
+            self.assertEqual(worker._apply_group_name(source, task, "同名回放"), source)
+            self.assertEqual(
+                sorted(path.name for path in output.glob("*.mp4")),
+                ["同名回放 (1).mp4", "同名回放.mp4"],
+            )
 
     def test_auto_collected_replay_title_names_godingtalk_output(self):
         class FakeProcess:

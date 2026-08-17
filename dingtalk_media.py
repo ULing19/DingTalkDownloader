@@ -43,11 +43,14 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.3.2 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.3.3 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WINDOWS_RESERVED_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.IGNORECASE
+)
 _VIDEO_EXTENSIONS = {
     ".m3u8",
     ".mp4",
@@ -59,6 +62,29 @@ _VIDEO_EXTENSIONS = {
     ".avi",
     ".wmv",
     ".ts",
+}
+_TITLE_FILE_EXTENSIONS = _VIDEO_EXTENSIONS | {
+    ".aac",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".flac",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".mp3",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".txt",
+    ".wav",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
 }
 _MIME_EXTENSIONS = {
     "video/mp4": ".mp4",
@@ -425,7 +451,7 @@ def _safe_title(value: Any, fallback: str) -> str:
     if not text:
         text = fallback
     # Windows 保留设备名。
-    if text.upper().split(".", 1)[0] in {"CON", "PRN", "AUX", "NUL"}:
+    if _WINDOWS_RESERVED_RE.fullmatch(text):
         text = "_" + text
     return text[:180] or fallback
 
@@ -711,7 +737,14 @@ def _extension_from_content_type(content_type: str) -> str:
 def _extension_for_media(title: str, content_type: str, media_url: str, fmt: str, converted: bool = False) -> str:
     if converted:
         return ".mp4"
-    for ext in (_extension_from_title(title), _extension_from_content_type(content_type), _extension_from_url(media_url)):
+    # A DingTalk title can contain dots that are part of the title (for
+    # example ``Python 3.10`` or ``2026.08.17``).  Only treat a title suffix
+    # as a file extension when it is a known media/document suffix; otherwise
+    # prefer the response MIME, URL, or MediaGo format.
+    title_ext = _extension_from_title(title)
+    if title_ext.lower() not in _TITLE_FILE_EXTENSIONS:
+        title_ext = ""
+    for ext in (title_ext, _extension_from_content_type(content_type), _extension_from_url(media_url)):
         if ext:
             return ext
     fmt = str(fmt or "").strip().lower()
@@ -720,15 +753,29 @@ def _extension_for_media(title: str, content_type: str, media_url: str, fmt: str
     return _safe_extension(fmt) or ".bin"
 
 
-def _output_stem(title: str) -> str:
+def safe_output_stem(title: str, output_extension: str = "") -> str:
+    """Return a Windows-safe stem, removing only a matching output suffix."""
+
     ext = _extension_from_title(title)
+    expected = _safe_extension(output_extension)
+    if expected:
+        if ext.lower() != expected.lower():
+            ext = ""
+    elif ext.lower() not in _TITLE_FILE_EXTENSIONS:
+        ext = ""
     stem = title[: -len(ext)] if ext else title
     stem = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", stem).strip(" .")
+    if _WINDOWS_RESERVED_RE.fullmatch(stem):
+        stem = "_" + stem
     return (stem or "钉钉媒体")[:180]
 
 
+def _output_stem(title: str, extension: str = "") -> str:
+    return safe_output_stem(title, extension)
+
+
 def _available_output(save_dir: Path, title: str, extension: str) -> Path:
-    stem = _output_stem(title)
+    stem = _output_stem(title, extension)
     candidate = save_dir / f"{stem}{extension}"
     index = 1
     while candidate.exists() or Path(str(candidate) + ".part").exists():
@@ -742,7 +789,7 @@ def _reserve_output(save_dir: Path, title: str, extension: str) -> Tuple[Path, P
 
     save_dir.mkdir(parents=True, exist_ok=True)
     with _OUTPUT_LOCK:
-        stem = _output_stem(title)
+        stem = _output_stem(title, extension)
         index = 0
         while True:
             suffix = "" if index == 0 else f" ({index})"
@@ -1254,5 +1301,6 @@ __all__ = [
     "inspect_mp4_av_timeline",
     "media_av_sync_warning",
     "resolve_with_mediago",
+    "safe_output_stem",
     "temporary_netscape_cookie_file",
 ]
