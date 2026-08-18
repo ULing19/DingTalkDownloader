@@ -45,7 +45,7 @@
 
 ### 1.3.4 兼容性更新
 
-- 登录不再要求安装 Google Chrome；Windows 10/11 会优先自动使用系统自带的 Microsoft Edge；
+- 电脑需要有至少一个可正常启动的 Chromium 内核浏览器；不要求额外安装 Google Chrome，Windows 10/11 会优先自动使用系统自带的 Microsoft Edge；
 - 同时自动发现 Chrome，以及 Brave、Chromium、Vivaldi、Opera、360、QQ 等 Chromium 内核浏览器；第三方浏览器能否登录取决于其 Chromium 调试接口兼容性；
 - 自动检测不到时，仍使用原有“重新登录”按钮选择一次 Chromium 浏览器程序，并在本机记住路径，不增加新的界面按钮；
 - 下载阶段只读取本机登录会话，不依赖浏览器持续运行。Firefox 不提供 GoDingtalk 所需的 Chromium 调试接口，因此不能用于自动登录。
@@ -109,13 +109,18 @@
 
 ## 快速开始
 
-### 安装版（推荐）
+安装版和绿色版是两种**二选一**的使用方式，不需要同时安装。首次使用前请先阅读下面的图文教程：
+
+- [下载中文图文使用教程（PDF）](docs/DingTalkDownloader_UserGuide_zh-CN.pdf)
+- [下载中文图文使用教程（DOCX）](docs/DingTalkDownloader_UserGuide_zh-CN.docx)
+
+### 方式一：安装版（推荐）
 
 从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.4_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留 `video\` 和 `.goDingtalkConfig\`，以免误删下载结果与登录会话，同时删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存；确认不再需要时再手动删除前两个目录。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
-### 绿色版
+### 方式二：绿色版
 
 同一 Release 提供 `DingTalkDownloader_1.3.4_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
@@ -130,7 +135,7 @@ ffmpeg.exe
 
 ## 首次使用
 
-1. 启动程序，点击“重新登录”。程序优先使用 Windows 自带的 Microsoft Edge，无需另装 Google Chrome；未自动识别时按提示选择一个 Chromium 浏览器程序。
+1. 启动程序，点击软件内的“重新登录”入口。程序会自动唤起可用的 Chromium 浏览器完成授权，优先使用 Windows 自带的 Microsoft Edge，无需另装 Google Chrome；未自动识别时按提示选择一个 Chromium 浏览器程序。
 2. 确认当前账号能在钉钉中打开目标回放、闪记或群文件。
 3. 将完整 URL 粘贴到左侧输入区，或导入文本文件、二维码图片；每行一个 URL，`#` 开头的行会被忽略。
 4. 点击“解析到任务列表”，检查链接类型、任务标题和保存目录。
@@ -140,7 +145,7 @@ ffmpeg.exe
 
 登录只证明当前账号的访问能力，不会提升群成员权限。会话保存在本机 `.goDingtalkConfig\`，不会自动上传 GitHub 或发送给项目作者。不要公开 `cookies.json`、浏览器 Cookie 导出文件、二维码截图中的私密链接或带令牌的日志。
 
-登录窗口使用独立会话，不会直接导入日常浏览器中的 Cookie。程序保证检测 Microsoft Edge，并兼容 GoDingtalk 原生支持的 Chrome；Brave、Chromium、Vivaldi、Opera 以及 Chromium 内核的 360/QQ 浏览器会自动发现并尝试，实际结果取决于具体版本。Firefox、Safari 和旧版 Internet Explorer 不兼容该登录引擎。完成一次有效登录后，解析和下载不要求浏览器保持打开。
+登录窗口使用独立会话，不会直接导入日常浏览器中的 Cookie。程序保证检测 Microsoft Edge，并兼容 GoDingtalk 原生支持的 Chrome；Brave、Chromium、Vivaldi、Opera 以及 Chromium 内核的 360/QQ 浏览器会自动发现并尝试，实际结果取决于具体版本。Firefox、Safari 和旧版 Internet Explorer 不兼容该登录引擎。登录授权必须通过软件内的入口唤起浏览器完成，不要手动复制 Cookie。完成一次有效登录后，解析和下载不要求浏览器保持打开。
 
 ## 保存结果与重名规则
 
@@ -163,7 +168,7 @@ ffmpeg.exe
 
 ## 音画同步与完整性检查
 
-`1.3.3` 中，群回放优先通过 MediaGo 取得完整 HLS 播放列表。这样 `EXT-X-DISCONTINUITY` 等时间轴标签会交给 FFmpeg 处理，而不是先把 TS 分片按字节拼接后再转换。钉钉屏幕共享可能合法地几十秒不产生新视频帧；FFmpeg 默认会把这种稀疏帧间隔误判为时间戳跳变并压缩视频轴。程序现在使用 `-copyts -start_at_zero` 保留源 PTS 后统一从零起算，显式选择首个视频轨和音频轨，并为媒体解析和网络读取设置超时；这些操作不重新编码画面或裁掉音频。
+`1.3.4` 中，群回放优先通过 MediaGo 取得完整 HLS 播放列表。这样 `EXT-X-DISCONTINUITY` 等时间轴标签会交给 FFmpeg 处理，而不是先把 TS 分片按字节拼接后再转换。钉钉屏幕共享可能合法地几十秒不产生新视频帧；FFmpeg 默认会把这种稀疏帧间隔误判为时间戳跳变并压缩视频轴。程序现在使用 `-copyts -start_at_zero` 保留源 PTS 后统一从零起算，显式选择首个视频轨和音频轨，并为媒体解析和网络读取设置超时；这些操作不重新编码画面或裁掉音频。
 
 下载结束后，程序直接读取 MP4 容器中的轨道元数据，不需要额外安装 FFprobe。以下情况会在任务结果中提示检查：
 
@@ -231,7 +236,7 @@ video\                         # 默认输出目录（本地数据）
 
 **没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.4`。程序会优先寻找 Microsoft Edge，并把 Edge 的完整路径传给登录引擎；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
 
-**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 1.3.3，并粘贴完整原始链接。
+**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 `1.3.4`，并粘贴完整原始链接。
 
 **闪记提示缺少 `account/access_token` 或 `deviceid`**：登录会话不完整或已过期。点击“重新登录”，并确认同一账号能在浏览器打开闪记页面。
 
@@ -241,7 +246,7 @@ video\                         # 默认输出目录（本地数据）
 
 **只有 TS，没有 MP4**：确认同目录存在 `ffmpeg.exe` 且未被拦截，再重试失败任务；不要在下载过程中移动程序目录。
 
-**提示“视频轨比音频早结束”**：先确认使用 `1.3.3` 或更高版本重新下载；新版已修复稀疏屏幕共享帧被 FFmpeg 压缩时间轴的问题。若重新下载后仍提示且钉钉客户端也在同一位置定格，通常是源回放或源分片本身不完整。
+**提示“视频轨比音频早结束”**：先确认使用 `1.3.4` 或更高版本重新下载；新版已修复稀疏屏幕共享帧被 FFmpeg 压缩时间轴的问题。若重新下载后仍提示且钉钉客户端也在同一位置定格，通常是源回放或源分片本身不完整。
 
 **二维码识别失败**：使用清晰原图并保留二维码四周空白；也可以直接复制二维码打开后的完整 URL。
 
