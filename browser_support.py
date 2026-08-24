@@ -254,13 +254,24 @@ def find_login_browser(
     return None
 
 
-def build_login_command(godingtalk: Path | str, browser: LoginBrowser) -> list[str]:
-    return [
+def build_login_command(
+    godingtalk: Path | str,
+    browser: LoginBrowser,
+    *,
+    config_file: Path | str | None = None,
+    cookies_file: Path | str | None = None,
+) -> list[str]:
+    command = [
         str(godingtalk),
         "-login",
         "-chromePath",
         str(browser.executable),
     ]
+    if config_file is not None:
+        command.extend(["-config", str(config_file)])
+    if cookies_file is not None:
+        command.extend(["-cookies", str(cookies_file)])
+    return command
 
 
 def launch_login_process(
@@ -268,10 +279,18 @@ def launch_login_process(
     browser: LoginBrowser,
     *,
     cwd: Path | str,
+    config_file: Path | str | None = None,
+    cookies_file: Path | str | None = None,
     popen: Optional[Callable[..., Any]] = None,
 ) -> Any:
     runner = subprocess.Popen if popen is None else popen
-    return runner(build_login_command(godingtalk, browser), cwd=str(cwd))
+    command = build_login_command(
+        godingtalk,
+        browser,
+        config_file=config_file,
+        cookies_file=cookies_file,
+    )
+    return runner(command, cwd=str(cwd))
 
 
 __all__ = [

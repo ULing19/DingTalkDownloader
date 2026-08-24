@@ -1314,7 +1314,12 @@ def _default_cookies_path() -> Path:
         if getattr(sys, "frozen", False)
         else Path(__file__).resolve().parent
     )
-    return base / ".goDingtalkConfig" / "cookies.json"
+    try:
+        from session_support import resolve_session_paths
+
+        return resolve_session_paths(base).cookies_file
+    except (ImportError, OSError):
+        return base / ".goDingtalkConfig" / "cookies.json"
 
 
 def _extract_replays_via_rpc(

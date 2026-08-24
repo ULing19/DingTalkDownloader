@@ -41,6 +41,11 @@ from dingtalk_media import (
     media_av_sync_warning,
     safe_output_stem,
 )
+from dingtalk_rpc import (
+    DingTalkAuthenticationError,
+    DingTalkRpcError,
+    probe_dingtalk_session,
+)
 from dingtalk_replay_extractor import (
     DingTalkNotReadyError,
     IncompleteReplayListError,
@@ -57,6 +62,11 @@ from replay_link_collector import (
     resolve_customer_root,
     safe_group_folder_name,
     save_settings,
+)
+from session_support import (
+    prepare_session_storage,
+    resolve_session_paths,
+    validate_dingtalk_session,
 )
 from updater import (
     CURRENT_VERSION,
@@ -81,9 +91,10 @@ def _app_dir() -> Path:
 
 APP_DIR = _app_dir()
 DEFAULT_SAVE = APP_DIR / "video"
-CONFIG_DIR = APP_DIR / ".goDingtalkConfig"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-COOKIES_FILE = CONFIG_DIR / "cookies.json"
+SESSION_PATHS = resolve_session_paths(APP_DIR)
+CONFIG_DIR = SESSION_PATHS.config_dir
+CONFIG_FILE = SESSION_PATHS.config_file
+COOKIES_FILE = SESSION_PATHS.cookies_file
 PROJECT_URL = "https://github.com/ULing19/DingTalkDownloader"
 UPSTREAM_URL = "https://github.com/NAXG/GoDingtalk"
 COLLECTOR_SETTINGS = (
@@ -96,6 +107,88 @@ COLLECTOR_SETTINGS = (
     / "settings.json"
 )
 MAX_REPLAY_METADATA = 5000
+_SINGLE_INSTANCE_HANDLE: Optional[int] = None
+
+
+def _acquire_single_instance(
+    name: str = r"Local\ULing19.DingTalkDownloader",
+) -> bool:
+    """Hold a Windows named mutex so two GUIs cannot race on one session."""
+
+    global _SINGLE_INSTANCE_HANDLE
+    if os.name != "nt":
+        return True
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.CreateMutexW(None, False, name)
+    last_error = ctypes.get_last_error()
+    if not handle:
+        return False
+    if last_error == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        return False
+    _SINGLE_INSTANCE_HANDLE = int(handle)
+    return True
+
+
+def _release_single_instance() -> None:
+    global _SINGLE_INSTANCE_HANDLE
+    if os.name != "nt" or _SINGLE_INSTANCE_HANDLE is None:
+        return
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    kernel32.CloseHandle(ctypes.c_void_p(_SINGLE_INSTANCE_HANDLE))
+    _SINGLE_INSTANCE_HANDLE = None
+
+
+def _terminate_process_tree(process: Any) -> None:
+    """Terminate only the child process tree launched by this GUI."""
+
+    try:
+        if process.poll() is not None:
+            return
+    except Exception:
+        return
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+        except Exception:
+            pass
+    try:
+        process.terminate()
+    except Exception:
+        pass
+
+
+def _probe_saved_session(cookies_path: Path) -> tuple[str, str]:
+    """Return an actionable result without confusing network errors with logout."""
+
+    try:
+        probe_dingtalk_session(cookies_path)
+    except DingTalkAuthenticationError as exc:
+        return "authentication", str(exc)
+    except DingTalkRpcError as exc:
+        return "unavailable", str(exc)
+    except Exception:
+        return "unavailable", "无法连接钉钉登录校验接口"
+    return "accepted", ""
 
 
 def _resource_path(relative: str) -> Path:
@@ -522,6 +615,8 @@ class DownloadWorker(threading.Thread):
         event_q: queue.Queue,
         stop_event: threading.Event,
         video_workers: int = 1,
+        config_file: Optional[Path] = None,
+        login_browser_path: Optional[Path] = None,
     ):
         super().__init__(daemon=True)
         self.godingtalk = godingtalk
@@ -534,6 +629,8 @@ class DownloadWorker(threading.Thread):
         self.event_q = event_q
         self.stop_event = stop_event
         self.video_workers = max(1, min(8, int(video_workers or 1)))
+        self.config_file = config_file
+        self.login_browser_path = login_browser_path
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
         self._active_processes: Set[Any] = set()
@@ -554,11 +651,7 @@ class DownloadWorker(threading.Thread):
             if id(proc) in seen:
                 continue
             seen.add(id(proc))
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
+            _terminate_process_tree(proc)
 
     def _set_current_process(self, proc: Optional[subprocess.Popen]):
         with self._process_lock:
@@ -820,8 +913,13 @@ class DownloadWorker(threading.Thread):
             "-thread",
             str(self.thread_count),
         ]
-        if self.cookies.exists():
-            cmd.extend(["-cookies", str(self.cookies)])
+        if self.config_file is not None:
+            cmd.extend(["-config", str(self.config_file)])
+        # Always pass the same stable session path. If the file disappears,
+        # GoDingtalk will write the replacement to this exact location.
+        cmd.extend(["-cookies", str(self.cookies)])
+        if self.login_browser_path is not None:
+            cmd.extend(["-chromePath", str(self.login_browser_path)])
 
         title = ""
         last_err = ""
@@ -975,6 +1073,14 @@ def build_gui():
         # Some Tk builds do not support .ico; the executable icon still applies.
         pass
 
+    session_migrated: tuple[str, ...] = ()
+    session_storage_error = ""
+    try:
+        session_preparation = prepare_session_storage(APP_DIR)
+        session_migrated = session_preparation.migrated_files
+    except OSError as exc:
+        session_storage_error = str(exc)
+
     exe_path = find_godingtalk()
     mediago_path = find_mediago(APP_DIR)
     ffmpeg_path = find_ffmpeg()
@@ -983,6 +1089,11 @@ def build_gui():
     stop_event = threading.Event()
     worker: Optional[DownloadWorker] = None
     collector_running = False
+    login_running = False
+    session_check_running = False
+    update_running = False
+    login_process: Optional[Any] = None
+    closing = False
     url_group_names: Dict[str, str] = {}
     url_replay_titles: Dict[str, str] = {}
 
@@ -1333,6 +1444,54 @@ def build_gui():
         hover_color="#115e59",
     )
 
+    def schedule_ui(callback, delay: int = 0) -> None:
+        """Send worker results through the queue; only the GUI thread calls Tk."""
+
+        if closing:
+            return
+        event_q.put(
+            {
+                "kind": "ui_callback",
+                "callback": callback,
+                "delay": max(0, int(delay)),
+            }
+        )
+
+    def refresh_action_states() -> None:
+        if closing:
+            return
+        busy = (
+            state.running
+            or collector_running
+            or login_running
+            or session_check_running
+            or update_running
+        )
+        normal_or_disabled = "disabled" if busy else "normal"
+        start_btn.configure(state=normal_or_disabled)
+        parse_btn.configure(state=normal_or_disabled)
+        login_btn.configure(state=normal_or_disabled)
+        collector_btn.configure(state=normal_or_disabled)
+        update_btn.configure(state=normal_or_disabled)
+        stop_btn.configure(state="normal" if state.running else "disabled")
+
+    def on_close() -> None:
+        nonlocal closing, login_process
+        if closing:
+            return
+        closing = True
+        stop_event.set()
+        if worker is not None:
+            worker.cancel_current()
+        process = login_process
+        login_process = None
+        if process is not None:
+            _terminate_process_tree(process)
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
     def open_project_link():
         try:
             if sys.platform == "win32":
@@ -1341,8 +1500,6 @@ def build_gui():
                 subprocess.Popen(["xdg-open", PROJECT_URL])
         except Exception as exc:
             messagebox.showerror("打开链接失败", str(exc))
-
-    update_running = False
 
     def _format_update_size(size: int) -> str:
         if size >= 1024 * 1024:
@@ -1371,10 +1528,11 @@ def build_gui():
                 )
                 log("绿色版更新已启动，程序退出后会自动替换文件并重启。")
                 messagebox.showinfo("更新已启动", "软件将退出并完成绿色版更新，完成后自动重启。")
-            app.after(300, app.destroy)
+            schedule_ui(on_close, 300)
         except (UpdateError, OSError) as exc:
             update_running = False
             update_btn.configure(state="normal", text="检查更新")
+            refresh_action_states()
             log(f"更新启动失败：{exc}")
             messagebox.showerror("更新失败", str(exc))
 
@@ -1386,6 +1544,7 @@ def build_gui():
         except UpdateError as exc:
             update_running = False
             update_btn.configure(state="normal", text="检查更新")
+            refresh_action_states()
             log(f"更新资产不可用：{exc}")
             messagebox.showerror("更新失败", str(exc))
             return
@@ -1397,15 +1556,17 @@ def build_gui():
             percent = int(done * 100 / max(1, total))
             if percent >= last_percent[0] + 5 or percent == 100:
                 last_percent[0] = percent
-                app.after(0, lambda p=percent: update_btn.configure(text=f"更新 {p}%"))
+                schedule_ui(lambda p=percent: update_btn.configure(text=f"更新 {p}%"))
 
         def worker() -> None:
             try:
                 downloaded = download_asset(asset, progress=progress)
             except Exception as exc:
-                app.after(0, lambda error=exc: _update_download_failed(error))
+                schedule_ui(lambda error=exc: _update_download_failed(error))
                 return
-            app.after(0, lambda path=downloaded, kind=asset_kind: _finish_update_download(kind, path))
+            schedule_ui(
+                lambda path=downloaded, kind=asset_kind: _finish_update_download(kind, path)
+            )
 
         threading.Thread(target=worker, name="dingtalk-update-download", daemon=True).start()
 
@@ -1413,6 +1574,7 @@ def build_gui():
         nonlocal update_running
         update_running = False
         update_btn.configure(state="normal", text="检查更新")
+        refresh_action_states()
         log(f"更新下载失败：{error}")
         messagebox.showerror("更新失败", str(error))
 
@@ -1425,17 +1587,30 @@ def build_gui():
             if user_initiated:
                 messagebox.showwarning("任务进行中", "请先完成或停止当前下载，再检查更新。")
             return
+        if collector_running or session_check_running:
+            log("采集或登录会话校验进行中，已跳过更新检查。")
+            if user_initiated:
+                messagebox.showwarning("操作进行中", "请先等待当前操作完成，再检查更新。")
+            return
+        if login_running:
+            log("登录授权进行中，已跳过更新检查。")
+            if user_initiated:
+                messagebox.showwarning("正在登录", "请先完成或取消登录授权，再检查更新。")
+            return
         update_running = True
         update_btn.configure(state="disabled", text="检查中…")
+        refresh_action_states()
         log("正在检查 GitHub 最新版本…")
 
         def worker() -> None:
             try:
                 info = fetch_latest_release()
             except Exception as exc:
-                app.after(0, lambda error=exc: _update_check_failed(error, user_initiated))
+                schedule_ui(lambda error=exc: _update_check_failed(error, user_initiated))
                 return
-            app.after(0, lambda release=info: _update_check_finished(release, user_initiated))
+            schedule_ui(
+                lambda release=info: _update_check_finished(release, user_initiated)
+            )
 
         threading.Thread(target=worker, name="dingtalk-update-check", daemon=True).start()
 
@@ -1443,6 +1618,7 @@ def build_gui():
         nonlocal update_running
         update_running = False
         update_btn.configure(state="normal", text="检查更新")
+        refresh_action_states()
         log(f"更新检查失败：{error}")
         if user_initiated:
             messagebox.showerror("检查更新失败", str(error))
@@ -1451,6 +1627,7 @@ def build_gui():
         nonlocal update_running
         update_running = False
         update_btn.configure(state="normal", text="检查更新")
+        refresh_action_states()
         if not is_newer_version(info.version, CURRENT_VERSION):
             log(f"当前已是最新版本 v{CURRENT_VERSION}。")
             if user_initiated:
@@ -1474,6 +1651,7 @@ def build_gui():
         if messagebox.askyesno("发现新版本", prompt):
             update_running = True
             update_btn.configure(state="disabled", text="准备更新…")
+            refresh_action_states()
             _download_update(info)
 
     update_btn.configure(command=lambda: check_updates(True))
@@ -1487,6 +1665,15 @@ def build_gui():
     update_btn.pack(side="right", padx=(8, 0))
 
     def parse_to_tasks():
+        if (
+            state.running
+            or collector_running
+            or login_running
+            or session_check_running
+            or update_running
+        ):
+            log("当前操作进行中，暂不能重新解析任务列表。")
+            return
         urls = extract_urls_from_text(textbox.get("1.0", "end"))
         if not urls:
             messagebox.showwarning("提示", "未找到有效的钉钉链接")
@@ -1529,6 +1716,7 @@ def build_gui():
         nonlocal collector_running
         collector_running = False
         collector_btn.configure(state="normal")
+        refresh_action_states()
         message = _collector_error_message(error)
         log(f"一键获取群链接失败：{message}（{type(error).__name__}）")
         messagebox.showerror("一键获取群链接失败", message)
@@ -1540,6 +1728,7 @@ def build_gui():
         if not results:
             collector_running = False
             collector_btn.configure(state="normal")
+            refresh_action_states()
             detail = "\n".join(errors[:5]) if errors else "没有找到仍打开的群直播广场。"
             log(f"一键采集未得到结果：{detail}")
             messagebox.showerror("一键采集失败", detail)
@@ -1587,9 +1776,10 @@ def build_gui():
 
             _remember_replay_metadata(settings, url_group_names, url_replay_titles)
             save_settings(settings, COLLECTOR_SETTINGS)
-            parse_to_tasks()
             collector_running = False
             collector_btn.configure(state="normal")
+            refresh_action_states()
+            parse_to_tasks()
             error_hint = f"；另有 {len(errors)} 个群失败" if errors else ""
             log(
                 f"一键采集完成：成功 {saved} 个群、{sum(len(item.links) for item in results)} 条链接，"
@@ -1611,9 +1801,13 @@ def build_gui():
         if state.running:
             messagebox.showwarning("任务进行中", "请先停止当前下载任务，再开始自动采集。")
             return
+        if login_running or update_running or session_check_running:
+            messagebox.showwarning("操作进行中", "请先完成登录、会话校验或更新，再开始自动采集。")
+            return
 
         collector_running = True
         collector_btn.configure(state="disabled")
+        refresh_action_states()
         log("正在自动发现当前登录态中已加载的群直播页；不会切换群聊或修改钉钉内容…")
 
         def worker() -> None:
@@ -1622,7 +1816,7 @@ def build_gui():
             try:
                 targets = find_open_group_renderers()
             except Exception as exc:
-                app.after(0, lambda error=exc: _auto_collection_finished([], [str(error)]))
+                schedule_ui(lambda error=exc: _auto_collection_finished([], [str(error)]))
                 return
 
             seen_cids: Set[str] = set()
@@ -1631,10 +1825,15 @@ def build_gui():
                     continue
                 seen_cids.add(target.cid)
                 try:
-                    results.append(extract_open_group_replays(target))
+                    results.append(
+                        extract_open_group_replays(
+                            target,
+                            cookies_path=COOKIES_FILE,
+                        )
+                    )
                 except Exception as exc:
                     errors.append(f"群 {target.cid}：{exc}")
-            app.after(0, lambda: _auto_collection_finished(results, errors))
+            schedule_ui(lambda: _auto_collection_finished(results, errors))
 
         threading.Thread(target=worker, name="dingtalk-auto-collector", daemon=True).start()
 
@@ -1646,9 +1845,32 @@ def build_gui():
         else:
             subprocess.Popen(["xdg-open", str(d)])
 
-    def do_login():
+    def do_login(resume_download: bool = False):
+        nonlocal login_running, login_process
         if not exe_path:
             messagebox.showerror("错误", "未找到 GoDingtalk 可执行文件")
+            return
+        if login_running:
+            log("登录授权仍在进行，请在已打开的浏览器中完成授权。")
+            return
+        if state.running:
+            messagebox.showwarning("任务进行中", "请先停止当前下载任务，再重新登录。")
+            return
+        if collector_running or session_check_running:
+            messagebox.showwarning("操作进行中", "请先完成当前采集或会话校验，再重新登录。")
+            return
+        if update_running:
+            messagebox.showwarning("更新进行中", "请先完成或取消更新，再重新登录。")
+            return
+
+        try:
+            prepare_session_storage(APP_DIR)
+        except OSError:
+            messagebox.showerror(
+                "登录失败",
+                "无法创建或写入当前 Windows 用户的登录会话目录。\n\n"
+                "请确认磁盘空间和用户目录权限正常后重试。",
+            )
             return
 
         settings = load_settings(COLLECTOR_SETTINGS)
@@ -1656,7 +1878,6 @@ def build_gui():
         browser = find_login_browser(
             configured_path if isinstance(configured_path, str) else None
         )
-        manually_selected = False
         if browser is None:
             messagebox.showinfo(
                 "选择登录浏览器",
@@ -1685,27 +1906,104 @@ def build_gui():
                     "所选程序不存在、无法访问，或不是受支持的 Chromium 浏览器。",
                 )
                 return
-            manually_selected = True
-
-        if manually_selected:
-            settings["login_browser_path"] = str(browser.executable)
-            try:
-                save_settings(settings, COLLECTOR_SETTINGS)
-            except OSError as exc:
-                log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
+        settings["login_browser_path"] = str(browser.executable)
+        try:
+            save_settings(settings, COLLECTOR_SETTINGS)
+        except OSError as exc:
+            log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
 
         log(f"正在使用 {browser.display_name} 打开钉钉登录…")
         try:
-            launch_login_process(exe_path, browser, cwd=APP_DIR)
+            login_process = launch_login_process(
+                exe_path,
+                browser,
+                cwd=APP_DIR,
+                config_file=CONFIG_FILE,
+                cookies_file=COOKIES_FILE,
+            )
         except Exception as exc:
             messagebox.showerror("登录失败", str(exc))
+            return
 
-    def start_download():
-        nonlocal worker
+        process = login_process
+        login_running = True
+        login_btn.configure(state="disabled", text="登录中…")
+        start_btn.configure(state="disabled")
+        refresh_action_states()
+        log("请在软件唤起的浏览器中完成授权；授权完成前无需再次点击下载。")
+
+        def finish_login(return_code: int, probe_result: tuple[str, str]) -> None:
+            nonlocal login_running, login_process
+            login_running = False
+            login_process = None
+            login_btn.configure(state="normal", text="重新登录")
+            refresh_action_states()
+            if not state.running:
+                start_btn.configure(state="normal")
+            status = validate_dingtalk_session(COOKIES_FILE)
+            if return_code == 0 and status.valid and probe_result[0] == "accepted":
+                log("登录授权完成，会话已保存；后续下载会复用该会话。")
+                if resume_download:
+                    log("正在继续刚才的下载任务…")
+                    schedule_ui(lambda: start_download(session_checked=True), 50)
+                else:
+                    messagebox.showinfo("登录成功", "授权状态已保存，可以开始下载。")
+                return
+
+            if not status.valid:
+                detail = status.reason
+            elif return_code != 0:
+                detail = f"登录引擎退出码 {return_code}"
+            else:
+                detail = probe_result[1]
+            log(f"登录未完成：{detail}")
+            if probe_result[0] == "unavailable":
+                messagebox.showerror(
+                    "登录状态暂无法校验",
+                    f"会话已写入，但{detail}。\n\n请检查网络后再点“开始下载”；软件不会循环要求登录。",
+                )
+            else:
+                messagebox.showerror(
+                    "登录未完成",
+                    f"{detail}。\n\n请只保留软件唤起的授权窗口，完成登录后等待窗口自动结束。",
+                )
+
+        def wait_for_login() -> None:
+            try:
+                return_code = int(process.wait()) if process is not None else -1
+            except Exception:
+                return_code = -1
+            status = validate_dingtalk_session(COOKIES_FILE)
+            probe_result = (
+                _probe_saved_session(COOKIES_FILE)
+                if return_code == 0 and status.valid
+                else ("invalid", status.reason)
+            )
+            try:
+                schedule_ui(
+                    lambda code=return_code, result=probe_result: finish_login(code, result)
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=wait_for_login,
+            name="dingtalk-login-monitor",
+            daemon=True,
+        ).start()
+
+    def start_download(*, session_checked: bool = False):
+        nonlocal worker, session_check_running
         if state.running:
+            return
+        if login_running:
+            messagebox.showinfo("正在登录", "请先在软件唤起的浏览器中完成授权。")
             return
         if update_running:
             messagebox.showwarning("正在检查更新", "请等待更新检查或下载完成后再开始任务。")
+            return
+        if collector_running:
+            messagebox.showwarning("正在采集", "请等待一键采集完成后再开始下载。")
             return
 
         urls = extract_urls_from_text(textbox.get("1.0", "end"))
@@ -1763,19 +2061,67 @@ def build_gui():
             )
             return
 
-        if not COOKIES_FILE.exists():
+        session_status = validate_dingtalk_session(COOKIES_FILE)
+        if not session_status.valid:
             if not godingtalk_ready:
                 messagebox.showerror(
                     "需要登录",
-                    f"未找到登录会话文件：\n{COOKIES_FILE}\n\n请先通过 GoDingtalk 登录。",
+                    f"{session_status.reason}，且未找到 GoDingtalk 登录引擎。",
                 )
                 return
             if not messagebox.askyesno(
                 "需要登录",
-                "未找到 cookies.json，是否先执行登录？\n（登录成功后再点开始下载）",
+                f"{session_status.reason}，需要重新授权。\n\n"
+                "是否现在登录？授权完成后软件会自动继续下载。",
             ):
                 return
-            do_login()
+            do_login(resume_download=True)
+            return
+
+        if not session_checked:
+            if session_check_running:
+                log("正在校验钉钉登录会话，请稍候…")
+                return
+
+            session_check_running = True
+            refresh_action_states()
+            log("正在校验钉钉登录会话，不读取群数据…")
+
+            def check_worker() -> None:
+                result = _probe_saved_session(COOKIES_FILE)
+
+                def finish_probe() -> None:
+                    nonlocal session_check_running
+                    session_check_running = False
+                    if result[0] == "accepted":
+                        log("钉钉已接受当前登录会话，开始下载。")
+                        start_download(session_checked=True)
+                        return
+                    if result[0] == "authentication":
+                        log(f"钉钉拒绝当前登录会话：{result[1]}")
+                        if messagebox.askyesno(
+                            "登录已失效",
+                            "钉钉拒绝了当前登录会话，需要重新授权。\n\n"
+                            "是否现在登录？授权完成后软件会自动继续下载。",
+                        ):
+                            do_login(resume_download=True)
+                        else:
+                            refresh_action_states()
+                        return
+                    log(f"登录会话校验失败：{result[1]}")
+                    messagebox.showerror(
+                        "无法校验登录",
+                        f"{result[1]}。\n\n网络不可用时不会自动要求重新登录，请联网后重试。",
+                    )
+                    refresh_action_states()
+
+                schedule_ui(finish_probe)
+
+            threading.Thread(
+                target=check_worker,
+                name="dingtalk-session-probe",
+                daemon=True,
+            ).start()
             return
 
         try:
@@ -1793,6 +2139,12 @@ def build_gui():
         save_dir = Path(save_var.get().strip() or str(DEFAULT_SAVE))
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        settings = load_settings(COLLECTOR_SETTINGS)
+        configured_browser = settings.get("login_browser_path")
+        download_browser = find_login_browser(
+            configured_browser if isinstance(configured_browser, str) else None
+        )
+
         state.tasks = tasks
         state.running = True
         state.stop_flag = False
@@ -1800,6 +2152,7 @@ def build_gui():
         state.overall_total = len(urls)
         stop_event.clear()
         rebuild_task_rows()
+        refresh_action_states()
 
         start_btn.configure(state="disabled")
         stop_btn.configure(state="normal")
@@ -1819,6 +2172,8 @@ def build_gui():
             event_q=event_q,
             stop_event=stop_event,
             video_workers=video_workers,
+            config_file=CONFIG_FILE,
+            login_browser_path=(download_browser.executable if download_browser else None),
         )
         worker.start()
 
@@ -1864,11 +2219,20 @@ def build_gui():
                             f"[{i+1}/{len(state.tasks)}] {t.kind_label}: "
                             f"{_task_display_title(t, t.title)}"
                         )
+                elif kind == "ui_callback":
+                    callback = ev.get("callback")
+                    delay = max(0, int(ev.get("delay", 0) or 0))
+                    if callable(callback) and not closing:
+                        if delay:
+                            app.after(
+                                delay,
+                                lambda fn=callback: fn() if not closing else None,
+                            )
+                        else:
+                            callback()
                 elif kind == "finished":
                     state.running = False
-                    start_btn.configure(state="normal")
-                    stop_btn.configure(state="disabled")
-                    parse_btn.configure(state="normal")
+                    refresh_action_states()
                     done = ev.get("done", 0)
                     total = ev.get("total", 0)
                     warnings = ev.get("warnings", 0)
@@ -1893,13 +2257,14 @@ def build_gui():
                         )
         except queue.Empty:
             pass
-        app.after(120, poll_events)
+        if not closing:
+            app.after(120, poll_events)
 
     start_btn.configure(command=start_download)
     stop_btn.configure(command=stop_download)
     parse_btn.configure(command=parse_to_tasks)
     open_btn.configure(command=open_save_dir)
-    login_btn.configure(command=do_login)
+    login_btn.configure(command=lambda: do_login(False))
     repo_btn.configure(command=open_project_link)
     collector_btn.configure(command=auto_collect_open_groups)
 
@@ -1909,16 +2274,21 @@ def build_gui():
         f"一键获取会自动识别已加载群直播页，按群名称保存 {LINK_FILE_NAME}；"
         "不会依赖已记忆群映射。"
     )
+    if session_storage_error:
+        log("警告：当前 Windows 用户的登录会话目录不可写，请检查用户目录权限。")
+    elif session_migrated:
+        log("已将旧版登录会话迁移到当前 Windows 用户目录，旧文件仍保留。")
     if not exe_path:
         log("提示：未找到 GoDingtalk，群回放将尝试使用 MediaGo。")
     if not mediago_path:
         log("警告：未找到 MediaGo，闪记和群文件任务暂不可用。")
     if not ffmpeg_path:
         log("警告：未找到 FFmpeg，MediaGo 媒体任务暂不可用。")
-    if COOKIES_FILE.exists():
-        log(f"已检测到 Cookies: {COOKIES_FILE}")
+    session_status = validate_dingtalk_session(COOKIES_FILE)
+    if session_status.valid:
+        log("已检测到有效的本机登录会话。")
     else:
-        log("未检测到 Cookies，首次使用请点「重新登录」。")
+        log(f"{session_status.reason}，首次使用请点「重新登录」。")
 
     # 快捷：把 video 下各科目 链接.txt 做成菜单提示
     sample = APP_DIR / "video" / "英语-强化" / "链接.txt"
@@ -1926,8 +2296,9 @@ def build_gui():
         log(f"提示: 可导入 {sample}")
 
     log(f"当前版本：v{CURRENT_VERSION}；可点击“检查更新”获取 GitHub 新版。")
-    app.after(3500, lambda: check_updates(False))
+    schedule_ui(lambda: check_updates(False), 3500)
 
+    app.protocol("WM_DELETE_WINDOW", on_close)
     poll_events()
     app.mainloop()
 
@@ -1939,25 +2310,31 @@ def main():
         from updater import main as updater_main
 
         raise SystemExit(updater_main(sys.argv[1:]))
+    if not _acquire_single_instance():
+        print("钉钉下载器已在运行。", file=sys.stderr)
+        raise SystemExit(2)
     try:
-        import customtkinter  # noqa: F401
-        import cv2  # noqa: F401
-        from PIL import Image  # noqa: F401
-    except ImportError as exc:
-        print("缺少依赖，正在尝试安装 customtkinter pillow opencv-python-headless …")
-        print(exc)
-        subprocess.check_call(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "customtkinter",
-                "pillow",
-                "opencv-python-headless",
-            ]
-        )
-    build_gui()
+        try:
+            import customtkinter  # noqa: F401
+            import cv2  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError as exc:
+            print("缺少依赖，正在尝试安装 customtkinter pillow opencv-python-headless …")
+            print(exc)
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "customtkinter",
+                    "pillow",
+                    "opencv-python-headless",
+                ]
+            )
+        build_gui()
+    finally:
+        _release_single_instance()
 
 
 if __name__ == "__main__":

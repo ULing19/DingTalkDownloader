@@ -13,6 +13,129 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_probe_saved_session_distinguishes_auth_network_and_success(self):
+        cookies = Path("cookies.json")
+        with mock.patch.object(gui, "probe_dingtalk_session"):
+            self.assertEqual(gui._probe_saved_session(cookies), ("accepted", ""))
+        with mock.patch.object(
+            gui,
+            "probe_dingtalk_session",
+            side_effect=gui.DingTalkAuthenticationError("会话被拒绝"),
+        ):
+            self.assertEqual(
+                gui._probe_saved_session(cookies),
+                ("authentication", "会话被拒绝"),
+            )
+        with mock.patch.object(
+            gui,
+            "probe_dingtalk_session",
+            side_effect=gui.DingTalkRpcError("网络不可用"),
+        ):
+            self.assertEqual(
+                gui._probe_saved_session(cookies),
+                ("unavailable", "网络不可用"),
+            )
+
+    def test_cancel_current_terminates_each_active_process_tree_once(self):
+        first = mock.Mock()
+        second = mock.Mock()
+        worker = gui.DownloadWorker(
+            godingtalk=None,
+            mediago=None,
+            ffmpeg=None,
+            tasks=[],
+            save_dir=Path("."),
+            cookies=Path("cookies.json"),
+            thread_count=1,
+            event_q=queue.Queue(),
+            stop_event=threading.Event(),
+        )
+        worker._active_processes = {first, second}
+        worker._current_process = first
+        with mock.patch.object(gui, "_terminate_process_tree") as terminate:
+            worker.cancel_current()
+        self.assertTrue(worker.stop_event.is_set())
+        self.assertEqual(terminate.call_count, 2)
+        terminate.assert_any_call(first)
+        terminate.assert_any_call(second)
+
+    def test_main_acquires_and_releases_single_instance(self):
+        with mock.patch.object(gui, "_acquire_single_instance", return_value=True) as acquire, mock.patch.object(
+            gui, "_release_single_instance"
+        ) as release, mock.patch.object(gui, "build_gui") as build:
+            gui.main()
+        acquire.assert_called_once_with()
+        build.assert_called_once_with()
+        release.assert_called_once_with()
+
+    def test_main_refuses_second_instance_without_building_gui(self):
+        with mock.patch.object(gui, "_acquire_single_instance", return_value=False), mock.patch.object(
+            gui, "_release_single_instance"
+        ) as release, mock.patch.object(gui, "build_gui") as build:
+            with self.assertRaisesRegex(SystemExit, "2"):
+                gui.main()
+        build.assert_not_called()
+        release.assert_not_called()
+
+    def test_portable_updater_mode_bypasses_single_instance(self):
+        import updater
+
+        with mock.patch.object(gui.sys, "argv", ["DingTalkDownloader.exe", "--apply-portable"]), mock.patch.object(
+            updater, "main", return_value=0
+        ) as update_main, mock.patch.object(gui, "_acquire_single_instance") as acquire, mock.patch.object(
+            gui, "build_gui"
+        ) as build:
+            with self.assertRaisesRegex(SystemExit, "0"):
+                gui.main()
+        update_main.assert_called_once_with(["--apply-portable"])
+        acquire.assert_not_called()
+        build.assert_not_called()
+
+    def test_godingtalk_download_pins_session_and_browser_paths(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = StringIO("")
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            godingtalk = root_path / "GoDingtalk.exe"
+            godingtalk.write_bytes(b"placeholder")
+            cookies = root_path / "session" / "cookies.json"
+            config = root_path / "session" / "config.json"
+            browser = root_path / "Edge" / "msedge.exe"
+            captured = {}
+            worker = gui.DownloadWorker(
+                godingtalk=godingtalk,
+                mediago=None,
+                ffmpeg=None,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=cookies,
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+                config_file=config,
+                login_browser_path=browser,
+            )
+
+            def fake_popen(command, **_kwargs):
+                captured["command"] = command
+                return FakeProcess()
+
+            with mock.patch.object(gui.subprocess, "Popen", side_effect=fake_popen):
+                worker._run_godingtalk(0, "https://example.test/replay")
+
+            command = captured["command"]
+            self.assertEqual(command[command.index("-config") + 1], str(config))
+            self.assertEqual(command[command.index("-cookies") + 1], str(cookies))
+            self.assertEqual(command[command.index("-chromePath") + 1], str(browser))
+
     def test_worker_runs_multiple_video_tasks_concurrently(self):
         tasks = [
             gui.make_task_item(

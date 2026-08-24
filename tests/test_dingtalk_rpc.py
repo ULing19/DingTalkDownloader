@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dingtalk_rpc import DingTalkRpcError, LIST_RECORDS_URI, list_live_records
+from dingtalk_rpc import (
+    DingTalkAuthenticationError,
+    DingTalkRpcError,
+    LIST_RECORDS_URI,
+    list_live_records,
+    probe_dingtalk_session,
+)
 
 
 TEST_CID = "10000000004"
@@ -72,6 +78,36 @@ class DingTalkRpcTests(unittest.TestCase):
         requests = [item for item in fake.sent if item.get("lwp") == LIST_RECORDS_URI]
         self.assertEqual([item["body"][0]["index"] for item in requests], [0, 10])
         self.assertEqual({item["body"][0]["cid"] for item in requests}, {cid})
+
+    def test_session_probe_only_registers_and_closes(self):
+        fake = _FakeSocket([{"headers": {"mid": "0 0"}, "code": 200}])
+        with tempfile.TemporaryDirectory() as root:
+            probe_dingtalk_session(
+                self._cookies(root),
+                websocket_factory=lambda *args, **kwargs: fake,
+            )
+        self.assertEqual([item["lwp"] for item in fake.sent], ["/reg"])
+        self.assertTrue(fake.closed)
+
+    def test_session_probe_classifies_rejected_registration(self):
+        fake = _FakeSocket([{"headers": {"mid": "0 0"}, "code": 401}])
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(DingTalkAuthenticationError, "已过期"):
+                probe_dingtalk_session(
+                    self._cookies(root),
+                    websocket_factory=lambda *args, **kwargs: fake,
+                )
+
+    def test_session_probe_classifies_connection_failure_without_auth_prompt(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(DingTalkRpcError, "无法连接") as raised:
+                probe_dingtalk_session(
+                    self._cookies(root),
+                    websocket_factory=lambda *args, **kwargs: (_ for _ in ()).throw(
+                        OSError("offline")
+                    ),
+                )
+        self.assertNotIsInstance(raised.exception, DingTalkAuthenticationError)
 
     def test_decodes_account_token_for_registration(self):
         fake = _FakeSocket([

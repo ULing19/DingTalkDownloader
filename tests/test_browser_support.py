@@ -185,6 +185,28 @@ class BrowserSupportTests(unittest.TestCase):
         )
         self.assertEqual(captured["cwd"], r"C:\App")
 
+    def test_login_command_pins_config_and_cookie_files(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        command = build_login_command(
+            Path(r"C:\App\GoDingtalk.exe"),
+            browser,
+            config_file=Path(r"C:\UserData\config.json"),
+            cookies_file=Path(r"C:\UserData\cookies.json"),
+        )
+        self.assertEqual(
+            command,
+            [
+                r"C:\App\GoDingtalk.exe",
+                "-login",
+                "-chromePath",
+                r"C:\Browser\msedge.exe",
+                "-config",
+                r"C:\UserData\config.json",
+                "-cookies",
+                r"C:\UserData\cookies.json",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

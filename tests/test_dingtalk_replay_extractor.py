@@ -811,6 +811,24 @@ class ReplayExtractorTests(unittest.TestCase):
         self.assertEqual([item.title for item in result.links], ["第二讲", "第一讲"])
         self.assertEqual([item.room_id for item in result.links], ["roomTwo", "roomOne"])
 
+    def test_default_cookie_path_uses_stable_local_app_data(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_app_data = Path(root) / "Local"
+            with mock.patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": str(local_app_data)},
+                clear=False,
+            ):
+                path = extractor._default_cookies_path()
+
+        self.assertEqual(
+            path,
+            local_app_data
+            / "DingTalkDownloader"
+            / ".goDingtalkConfig"
+            / "cookies.json",
+        )
+
     def test_current_group_prefers_rpc_and_adds_process_group_name(self):
         target = extractor.RendererTarget(123, CID, Path("cef_debug.log"))
         rpc_result = extractor.ReplayExtractionResult(

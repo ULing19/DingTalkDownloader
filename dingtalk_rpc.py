@@ -29,6 +29,10 @@ class DingTalkRpcError(RuntimeError):
     """A read-only DingTalk RPC request could not be validated."""
 
 
+class DingTalkAuthenticationError(DingTalkRpcError):
+    """The local session was structurally valid but DingTalk rejected it."""
+
+
 @dataclass(frozen=True)
 class RpcReplayRecord:
     cid: str
@@ -166,6 +170,83 @@ def _parse_page(body: Mapping[str, Any], cid: str) -> tuple[List[RpcReplayRecord
     return records, _ended(body.get("isEnd"))
 
 
+def _cookie_connection_material(cookies_path: Path) -> tuple[str, str]:
+    cookies = _load_cookie_values(Path(cookies_path))
+    token = (
+        unquote(cookies["account"])
+        if cookies.get("account")
+        else str(cookies.get("access_token") or "").strip()
+    )
+    cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
+    return token, cookie_header
+
+
+def _websocket_factory(factory: Optional[Callable[..., Any]]) -> Callable[..., Any]:
+    if factory is not None:
+        return factory
+    try:
+        import websocket
+    except ImportError as exc:
+        raise DingTalkRpcError("缺少钉钉只读接口组件") from exc
+    return websocket.create_connection
+
+
+def _registration_payload(token: str) -> str:
+    return json.dumps(
+        {
+            "lwp": "/reg",
+            "headers": {
+                "app-key": LIVE_APP_KEY,
+                "token": token,
+                "ua": PC_USER_AGENT,
+                "mid": "0 0",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def probe_dingtalk_session(
+    cookies_path: Path,
+    *,
+    websocket_factory: Optional[Callable[..., Any]] = None,
+    timeout: float = 8.0,
+) -> None:
+    """Verify that DingTalk accepts the saved session without reading group data."""
+
+    token, cookie_header = _cookie_connection_material(Path(cookies_path))
+    factory = _websocket_factory(websocket_factory)
+    socket = None
+    try:
+        socket = factory(
+            LWP_URL,
+            timeout=timeout,
+            cookie=cookie_header,
+            header=[f"User-Agent: {PC_USER_AGENT}"],
+        )
+        socket.send(_registration_payload(token))
+        for _ in range(100):
+            message = _decode_message(socket.recv())
+            if _message_mid(message) != "0":
+                continue
+            if _status_code(message) not in {0, 200}:
+                raise DingTalkAuthenticationError("登录会话已过期或被钉钉拒绝")
+            return
+        raise DingTalkRpcError("钉钉登录校验响应超时")
+    except DingTalkAuthenticationError:
+        raise
+    except DingTalkRpcError:
+        raise
+    except Exception as exc:
+        raise DingTalkRpcError("无法连接钉钉登录校验接口") from exc
+    finally:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:
+                pass
+
+
 def list_live_records(
     cid: str,
     cookies_path: Path,
@@ -178,19 +259,8 @@ def list_live_records(
     cid = str(cid or "").strip()
     if not CID_RE.fullmatch(cid):
         raise DingTalkRpcError("群聊 ID 格式无效")
-    cookies = _load_cookie_values(Path(cookies_path))
-    token = (
-        unquote(cookies["account"])
-        if cookies.get("account")
-        else str(cookies.get("access_token") or "").strip()
-    )
-    cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
-    if websocket_factory is None:
-        try:
-            import websocket
-        except ImportError as exc:
-            raise DingTalkRpcError("缺少钉钉只读接口组件") from exc
-        websocket_factory = websocket.create_connection
+    token, cookie_header = _cookie_connection_material(Path(cookies_path))
+    websocket_factory = _websocket_factory(websocket_factory)
 
     socket = None
     try:
@@ -200,20 +270,7 @@ def list_live_records(
             cookie=cookie_header,
             header=[f"User-Agent: {PC_USER_AGENT}"],
         )
-        socket.send(
-            json.dumps(
-                {
-                    "lwp": "/reg",
-                    "headers": {
-                        "app-key": LIVE_APP_KEY,
-                        "token": token,
-                        "ua": PC_USER_AGENT,
-                        "mid": "0 0",
-                    },
-                },
-                separators=(",", ":"),
-            )
-        )
+        socket.send(_registration_payload(token))
         _receive_for_mid(socket, "0")
 
         all_records: List[RpcReplayRecord] = []
@@ -266,4 +323,10 @@ def list_live_records(
                 pass
 
 
-__all__ = ["DingTalkRpcError", "RpcReplayRecord", "list_live_records"]
+__all__ = [
+    "DingTalkAuthenticationError",
+    "DingTalkRpcError",
+    "RpcReplayRecord",
+    "list_live_records",
+    "probe_dingtalk_session",
+]
