@@ -3,8 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import browser_support
 from browser_support import (
+    ChromiumLoginProcess,
     LoginBrowser,
     build_login_command,
     find_login_browser,
@@ -20,6 +23,20 @@ def _touch(path: Path) -> Path:
 
 
 class BrowserSupportTests(unittest.TestCase):
+    def test_registry_command_value_is_reduced_to_executable_path(self):
+        self.assertEqual(
+            browser_support._executable_token(
+                '"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" --profile-directory=Default'
+            ),
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        )
+        self.assertEqual(
+            browser_support._executable_token(
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe --single-argument %1"
+            ),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        )
+
     def test_edge_is_found_in_versioned_application_directory(self):
         with tempfile.TemporaryDirectory() as root:
             program_files = Path(root) / "Program Files (x86)"
@@ -206,6 +223,61 @@ class BrowserSupportTests(unittest.TestCase):
                 r"C:\UserData\cookies.json",
             ],
         )
+
+    def test_cdp_login_uses_direct_url_and_allows_modern_chromium_origin(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        captured = {}
+
+        class FakeChild:
+            pid = 77
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            return FakeChild()
+
+        with tempfile.TemporaryDirectory() as root:
+            process = ChromiumLoginProcess(
+                browser,
+                cookies_file=Path(root) / "cookies.json",
+                popen=fake_popen,
+                start_monitor=False,
+            )
+            try:
+                self.assertIn("--remote-allow-origins=*", captured["command"])
+                self.assertEqual(captured["command"][-1], browser_support.LOGIN_URL)
+                self.assertEqual(captured["kwargs"]["cwd"], str(process._profile))
+            finally:
+                process.terminate()
+
+    def test_cdp_login_process_rejects_duplicate_active_session(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        fake = mock.Mock()
+        fake.pid = 78
+        fake.poll.return_value = None
+        with tempfile.TemporaryDirectory() as root:
+            first = ChromiumLoginProcess(
+                browser,
+                cookies_file=Path(root) / "one.json",
+                popen=lambda *_args, **_kwargs: fake,
+                start_monitor=False,
+            )
+            browser_support._ACTIVE_LOGIN = first
+            try:
+                with self.assertRaises(browser_support.LoginLaunchError):
+                    browser_support._launch_cdp_login(
+                        browser,
+                        cookies_file=Path(root) / "two.json",
+                    )
+            finally:
+                browser_support._ACTIVE_LOGIN = None
+                first.terminate()
 
 
 if __name__ == "__main__":

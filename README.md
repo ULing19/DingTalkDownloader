@@ -45,7 +45,14 @@
 - 支持受限的多视频并发：分别控制单视频分片线程和同时下载的视频数量，避免无限制占满带宽；
 - 后台检查 GitHub 最新 Release，用户确认后下载并校验 SHA-256，再启动安装版或绿色版更新流程。
 
-### 1.3.5 登录会话兼容更新
+### 1.3.6 登录与浏览器兼容更新
+
+- 首次运行会自动创建合法的空 `config.json` 与 `cookies.json`，不会因目录中没有 Cookie 而提前失败；
+- 登录会话优先放在当前 Windows 用户可写的 `%LOCALAPPDATA%`，重定向目录不可写时自动切换到稳定的用户目录；
+- 登录授权使用软件创建的独立 Edge/Chromium 临时窗口，直接打开钉钉授权页，并兼容新版 Chromium 的 DevTools Origin 校验；
+- 同一时间只允许一个登录授权窗口，完成或取消后会清理本次临时浏览器进程，不读取或覆盖日常浏览器配置。
+
+### 1.3.5 登录会话兼容更新（历史）
 
 - 登录会话改为保存在当前 Windows 用户可写且跨安装目录稳定的 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`；首次启动会复制旧版程序目录中的会话，旧文件仍保留；
 - “重新登录”不再只负责打开浏览器：软件会等待授权引擎退出，检查账号令牌、设备标识等必要字段，并通过钉钉只读注册接口确认会话被接受后才显示成功；该检查不读取群数据，也不代表拥有某个群的回放权限；
@@ -127,13 +134,13 @@
 
 ### 方式一：安装版（推荐）
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.5_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.6_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.5_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.6_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -245,11 +252,15 @@ video\                         # 默认输出目录（本地数据）
 
 **提示“未找到下载引擎”**：确认主程序、GoDingtalk、MediaGo 和 FFmpeg 在同一目录，并检查安全软件是否隔离了其中的文件。
 
-**没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.4`。程序会优先寻找 Microsoft Edge，并把 Edge 的完整路径传给登录引擎；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
+**没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.6`。程序会优先寻找 Microsoft Edge；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
 
-**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 `1.3.4`，并粘贴完整原始链接。
+**登录窗口停在 `about:blank` 或浏览器没有打开**：升级到 `1.3.6`，退出旧版下载器后再次点击“重新登录”。新版会用独立临时窗口直接打开钉钉授权页，并处理新版 Chromium 的 DevTools Origin 校验；不要连续点击按钮，也不要手动关闭授权窗口直到软件提示结果。
 
-**浏览器授权成功，但点击下载又反复要求登录**：升级到 `1.3.5`。新版会等待会话完整写入，并让登录、MediaGo 与 GoDingtalk 兼容回退共用 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\cookies.json`；下载前只进行一次在线校验，断网不会误判成掉登录。授权时只保留软件唤起的浏览器窗口，等待软件提示“登录成功”后再操作；不要发送 Cookie 内容。
+**首次运行提示找不到 Cookie**：不需要手动创建或复制 Cookie。1.3.6 会先在可写的用户目录创建空的 `config.json` 和 `cookies.json`，授权完成后自动写入；若默认 `%LOCALAPPDATA%` 被策略重定向，日志会显示实际使用的备用目录。
+
+**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 `1.3.6`，并粘贴完整原始链接。
+
+**浏览器授权成功，但点击下载又反复要求登录**：升级到 `1.3.6`。新版会等待会话完整写入，并让登录、MediaGo 与 GoDingtalk 兼容回退共用 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\cookies.json`；下载前只进行一次在线校验，断网不会误判成掉登录。授权时只保留软件唤起的浏览器窗口，等待软件提示“登录成功”后再操作；不要发送 Cookie 内容。
 
 **闪记提示缺少 `account/access_token` 或 `deviceid`**：登录会话不完整或已过期。点击“重新登录”，并确认同一账号能在浏览器打开闪记页面。
 
@@ -285,4 +296,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.5`。
+当前 GUI/安装包版本：`1.3.6`。

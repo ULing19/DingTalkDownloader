@@ -1059,6 +1059,8 @@ def build_gui():
     import customtkinter as ctk
     from tkinter import filedialog, messagebox
 
+    global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
+
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
@@ -1074,10 +1076,20 @@ def build_gui():
         pass
 
     session_migrated: tuple[str, ...] = ()
+    session_fallback_used = False
     session_storage_error = ""
     try:
         session_preparation = prepare_session_storage(APP_DIR)
+        # ``prepare_session_storage`` may select a per-user fallback when an
+        # installed directory or redirected LOCALAPPDATA is not writable.
+        # All subsequent login, probe, collection and download operations must
+        # use the exact paths that were actually prepared.
+        SESSION_PATHS = session_preparation.paths
+        CONFIG_DIR = SESSION_PATHS.config_dir
+        CONFIG_FILE = SESSION_PATHS.config_file
+        COOKIES_FILE = SESSION_PATHS.cookies_file
         session_migrated = session_preparation.migrated_files
+        session_fallback_used = session_preparation.fallback_used
     except OSError as exc:
         session_storage_error = str(exc)
 
@@ -1846,6 +1858,7 @@ def build_gui():
             subprocess.Popen(["xdg-open", str(d)])
 
     def do_login(resume_download: bool = False):
+        global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
         nonlocal login_running, login_process
         if not exe_path:
             messagebox.showerror("错误", "未找到 GoDingtalk 可执行文件")
@@ -1864,12 +1877,17 @@ def build_gui():
             return
 
         try:
-            prepare_session_storage(APP_DIR)
-        except OSError:
+            preparation = prepare_session_storage(APP_DIR)
+            SESSION_PATHS = preparation.paths
+            CONFIG_DIR = SESSION_PATHS.config_dir
+            CONFIG_FILE = SESSION_PATHS.config_file
+            COOKIES_FILE = SESSION_PATHS.cookies_file
+        except OSError as exc:
             messagebox.showerror(
                 "登录失败",
-                "无法创建或写入当前 Windows 用户的登录会话目录。\n\n"
-                "请确认磁盘空间和用户目录权限正常后重试。",
+                "无法创建或写入登录会话目录。\n\n"
+                f"{exc}\n\n"
+                "请确认用户目录和磁盘空间可写后重试。",
             )
             return
 
@@ -1950,7 +1968,10 @@ def build_gui():
                     messagebox.showinfo("登录成功", "授权状态已保存，可以开始下载。")
                 return
 
-            if not status.valid:
+            process_detail = str(getattr(process, "error", "") or "").strip()
+            if process_detail:
+                detail = process_detail
+            elif not status.valid:
                 detail = status.reason
             elif return_code != 0:
                 detail = f"登录引擎退出码 {return_code}"
@@ -1974,10 +1995,11 @@ def build_gui():
             except Exception:
                 return_code = -1
             status = validate_dingtalk_session(COOKIES_FILE)
+            process_error = str(getattr(process, "error", "") or "").strip()
             probe_result = (
                 _probe_saved_session(COOKIES_FILE)
                 if return_code == 0 and status.valid
-                else ("invalid", status.reason)
+                else ("invalid", process_error or status.reason)
             )
             try:
                 schedule_ui(
@@ -2276,6 +2298,8 @@ def build_gui():
     )
     if session_storage_error:
         log("警告：当前 Windows 用户的登录会话目录不可写，请检查用户目录权限。")
+    elif session_fallback_used:
+        log(f"默认登录目录不可写，已切换到可写目录：{CONFIG_DIR}")
     elif session_migrated:
         log("已将旧版登录会话迁移到当前 Windows 用户目录，旧文件仍保留。")
     if not exe_path:

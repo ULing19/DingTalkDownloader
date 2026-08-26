@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import queue
 import tempfile
 import threading
@@ -13,6 +14,26 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_login_persists_fallback_session_paths_for_downloads(self):
+        tree = ast.parse(Path(gui.__file__).read_text(encoding="utf-8"))
+        login_functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "do_login"
+        ]
+        self.assertEqual(len(login_functions), 1)
+        global_names = {
+            name
+            for statement in login_functions[0].body
+            if isinstance(statement, ast.Global)
+            for name in statement.names
+        }
+        self.assertTrue(
+            {"SESSION_PATHS", "CONFIG_DIR", "CONFIG_FILE", "COOKIES_FILE"}
+            <= global_names
+        )
+
     def test_probe_saved_session_distinguishes_auth_network_and_success(self):
         cookies = Path("cookies.json")
         with mock.patch.object(gui, "probe_dingtalk_session"):

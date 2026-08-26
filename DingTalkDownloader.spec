@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.3.5
+# DingTalkDownloader release version: 1.3.6
 import os
 
 from PyInstaller.utils.hooks import collect_all

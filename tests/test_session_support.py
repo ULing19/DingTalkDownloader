@@ -4,7 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import session_support
 from session_support import (
     prepare_session_storage,
     resolve_session_paths,
@@ -20,6 +22,53 @@ VALID_SESSION = {
 
 
 class SessionSupportTests(unittest.TestCase):
+    def test_first_run_creates_valid_empty_json_placeholders(self):
+        with tempfile.TemporaryDirectory() as root:
+            app_dir = Path(root) / "portable"
+            result = prepare_session_storage(app_dir, env={"LOCALAPPDATA": str(Path(root) / "Local")})
+            self.assertEqual(json.loads(result.paths.config_file.read_text(encoding="utf-8")), {})
+            self.assertEqual(json.loads(result.paths.cookies_file.read_text(encoding="utf-8")), {})
+            self.assertFalse(validate_dingtalk_session(result.paths.cookies_file).valid)
+            self.assertIn("账号令牌", validate_dingtalk_session(result.paths.cookies_file).reason)
+
+    def test_zero_byte_placeholder_is_repaired_but_existing_session_is_preserved(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            app_dir = root_path / "app"
+            env = {"LOCALAPPDATA": str(root_path / "Local")}
+            paths = resolve_session_paths(app_dir, env=env)
+            paths.config_dir.mkdir(parents=True)
+            paths.cookies_file.write_bytes(b"")
+            paths.config_file.write_text(json.dumps(VALID_SESSION), encoding="utf-8")
+            prepare_session_storage(app_dir, env=env)
+            self.assertEqual(paths.cookies_file.read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual(json.loads(paths.config_file.read_text(encoding="utf-8")), VALID_SESSION)
+
+    def test_unwritable_primary_uses_stable_fallback_and_reports_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            app_dir = root_path / "app"
+            local = root_path / "redirected-local"
+            user_profile = root_path / "profile"
+            env = {
+                "LOCALAPPDATA": str(local),
+                "USERPROFILE": str(user_profile),
+            }
+            original = session_support._verify_writable_directory
+
+            def verify(path):
+                if path == local / "DingTalkDownloader" / ".goDingtalkConfig":
+                    raise OSError("模拟重定向目录不可写")
+                return original(path)
+
+            with mock.patch.object(session_support, "_verify_writable_directory", side_effect=verify):
+                result = prepare_session_storage(app_dir, env=env)
+            self.assertTrue(result.fallback_used)
+            self.assertEqual(
+                result.paths.config_dir,
+                user_profile / "AppData" / "Local" / "DingTalkDownloader" / ".goDingtalkConfig",
+            )
+            self.assertTrue(result.paths.cookies_file.is_file())
     def test_local_app_data_location_is_stable_across_app_directories(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
