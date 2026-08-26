@@ -439,6 +439,8 @@ class TaskItem:
     index: int = 0
     group_name: str = ""
     replay_title: str = ""
+    # 任务在解析列表中默认选中；取消选择只影响本次下载，不会删除链接。
+    selected: bool = True
 
 
 def make_task_item(
@@ -481,16 +483,74 @@ def _retain_url_metadata(
 ) -> None:
     """Drop metadata for removed URLs while preserving current replay titles."""
 
-    current_urls = {str(url) for url in urls}
+    current_urls = {_canonical_replay_url(str(url)) for url in urls}
     for metadata in metadata_maps:
         for url in tuple(metadata):
-            if url not in current_urls:
+            if _canonical_replay_url(url) not in current_urls:
                 metadata.pop(url, None)
 
 
+def _canonical_replay_url(url: str) -> str:
+    """Normalize a live URL for local title metadata lookups.
+
+    DingTalk copies may append ``cid``, tracking parameters, fragments, or use
+    a different host casing.  The media URL itself is preserved for the
+    downloader; only the metadata key is canonicalized so an extracted title
+    cannot be lost when the user pastes the copied link later.
+    """
+
+    raw = str(url or "").strip()
+    try:
+        info = classify_dingtalk_url(raw)
+        if info.kind != KIND_LIVE:
+            return raw
+        parsed = urlparse(info.normalized_url or raw)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+
+        def first_value(name: str) -> str:
+            wanted = name.casefold()
+            for key, values in query.items():
+                if key.casefold() == wanted and values:
+                    value = str(values[0]).strip()
+                    if value:
+                        return value
+            return ""
+
+        room_id = first_value("roomId")
+        live_uuid = first_value("liveUuid")
+        if room_id and live_uuid:
+            return (
+                "https://n.dingtalk.com/dingding/live-room/index.html?"
+                + urlencode({"roomId": room_id, "liveUuid": live_uuid})
+            )
+    except Exception:
+        pass
+    return raw.split("#", 1)[0]
+
+
 def _replay_metadata_key(url: str) -> str:
-    digest = hashlib.sha256(str(url).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(_canonical_replay_url(url).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _metadata_value(metadata: Dict[str, str], url: str) -> str:
+    """Return metadata for equivalent live-URL spellings.
+
+    In-memory maps are populated by the collector and can therefore contain a
+    URL copied before/after DingTalk appended a tracking query. Resolve the
+    canonical form here instead of silently falling back to an engine title.
+    """
+
+    exact = str(metadata.get(url) or "").strip()
+    if exact:
+        return exact
+    wanted = _canonical_replay_url(url)
+    for candidate, value in metadata.items():
+        if _canonical_replay_url(candidate) == wanted:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
 
 
 def _replay_metadata_maps(
@@ -506,11 +566,19 @@ def _replay_metadata_maps(
     for raw_url in dict.fromkeys(str(item or "").strip() for item in urls):
         if not raw_url or classify_dingtalk_url(raw_url).kind != KIND_LIVE:
             continue
-        raw_item = raw_metadata.get(_replay_metadata_key(raw_url))
+        canonical_key = _replay_metadata_key(raw_url)
+        raw_item = raw_metadata.get(canonical_key)
+        if not isinstance(raw_item, dict):
+            # 1.3.6 hashed the literal URL. Keep those entries readable after
+            # upgrading to canonical keys (query order/casing may differ).
+            legacy_digest = hashlib.sha256(raw_url.encode("utf-8")).hexdigest()
+            raw_item = raw_metadata.get(f"sha256:{legacy_digest}")
         if not isinstance(raw_item, dict):
             # Read old plaintext-key settings once. A later collection save
             # rewrites current entries under non-reversible hash keys.
-            raw_item = raw_metadata.get(raw_url)
+            raw_item = raw_metadata.get(_canonical_replay_url(raw_url))
+            if not isinstance(raw_item, dict):
+                raw_item = raw_metadata.get(raw_url)
         if not isinstance(raw_item, dict):
             continue
         group_name = str(raw_item.get("group_name") or "").strip()
@@ -569,8 +637,12 @@ def _remember_replay_metadata(
             continue
         key = _replay_metadata_key(url)
         previous = metadata.pop(key, {})
-        group_name = str(group_names.get(url) or previous.get("group_name") or "").strip()
-        replay_title = str(replay_titles.get(url) or previous.get("replay_title") or "").strip()
+        group_name = str(
+            _metadata_value(group_names, url) or previous.get("group_name") or ""
+        ).strip()
+        replay_title = str(
+            _metadata_value(replay_titles, url) or previous.get("replay_title") or ""
+        ).strip()
         item: Dict[str, str] = {}
         if group_name and len(group_name) <= 256:
             item["group_name"] = group_name
@@ -670,10 +742,15 @@ class DownloadWorker(threading.Thread):
 
     def run(self):
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        total = len(self.tasks)
+        # Keep the original list positions so GUI progress events still update
+        # the correct row when the user selects a non-contiguous subset.
+        active_tasks = [
+            (index, task) for index, task in enumerate(self.tasks) if task.selected
+        ]
+        total = len(active_tasks)
         done = 0
         warnings = 0
-        if not self.tasks:
+        if not active_tasks:
             self.emit("finished", done=0, total=0, warnings=0)
             return
 
@@ -681,7 +758,7 @@ class DownloadWorker(threading.Thread):
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dingtalk-video") as pool:
             futures: Dict[Future, int] = {
                 pool.submit(self._run_task, index, task): index
-                for index, task in enumerate(self.tasks)
+                for index, task in active_tasks
             }
             for future in as_completed(futures):
                 index = futures[future]
@@ -1057,7 +1134,7 @@ class DownloadWorker(threading.Thread):
 
 def build_gui():
     import customtkinter as ctk
-    from tkinter import filedialog, messagebox
+    from tkinter import BooleanVar, filedialog, messagebox
 
     global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
 
@@ -1304,6 +1381,24 @@ def build_gui():
         text="下载任务",
         font=ctk.CTkFont(size=15, weight="bold"),
     ).pack(side="left")
+    selection_tools = ctk.CTkFrame(head, fg_color="transparent")
+    selection_tools.pack(side="right")
+    select_all_btn = ctk.CTkButton(
+        selection_tools,
+        text="全选",
+        width=54,
+        height=24,
+    )
+    select_all_btn.pack(side="left", padx=(0, 4))
+    select_none_btn = ctk.CTkButton(
+        selection_tools,
+        text="全不选",
+        width=62,
+        height=24,
+        fg_color="#555",
+        hover_color="#666",
+    )
+    select_none_btn.pack(side="left", padx=(0, 8))
     task_count_lbl = ctk.CTkLabel(head, text="0 项", text_color="gray70")
     task_count_lbl.pack(side="right")
 
@@ -1313,6 +1408,27 @@ def build_gui():
 
     # 每行 UI 缓存
     row_widgets = []  # list of dicts
+
+    def update_selection_summary() -> None:
+        selected_count = sum(1 for task in state.tasks if task.selected)
+        task_count_lbl.configure(
+            text=f"{len(state.tasks)} 项，已选 {selected_count}"
+        )
+
+    def on_task_selection(index: int, variable: Any) -> None:
+        if 0 <= index < len(state.tasks):
+            state.tasks[index].selected = bool(variable.get())
+            update_selection_summary()
+
+    def set_all_selected(selected: bool) -> None:
+        for index, task in enumerate(state.tasks):
+            task.selected = bool(selected)
+            if index < len(row_widgets):
+                row_widgets[index]["selected_var"].set(task.selected)
+        update_selection_summary()
+
+    select_all_btn.configure(command=lambda: set_all_selected(True))
+    select_none_btn.configure(command=lambda: set_all_selected(False))
 
     def rebuild_task_rows():
         for w in row_widgets:
@@ -1324,6 +1440,18 @@ def build_gui():
 
             top_r = ctk.CTkFrame(fr, fg_color="transparent")
             top_r.pack(fill="x", padx=8, pady=(8, 2))
+
+            selected_var = BooleanVar(value=bool(t.selected))
+            selected_box = ctk.CTkCheckBox(
+                top_r,
+                text="",
+                width=24,
+                variable=selected_var,
+                command=lambda index=i, variable=selected_var: on_task_selection(
+                    index, variable
+                ),
+            )
+            selected_box.pack(side="left", padx=(0, 2))
 
             idx_lbl = ctk.CTkLabel(
                 top_r, text=f"#{i+1}", width=36, font=ctk.CTkFont(weight="bold")
@@ -1366,6 +1494,8 @@ def build_gui():
             row_widgets.append(
                 {
                     "frame": fr,
+                    "selected": selected_box,
+                    "selected_var": selected_var,
                     "kind": kind_lbl,
                     "name": name_lbl,
                     "status": status_lbl,
@@ -1373,13 +1503,14 @@ def build_gui():
                     "msg": msg_lbl,
                 }
             )
-        task_count_lbl.configure(text=f"{len(state.tasks)} 项")
+        update_selection_summary()
 
     def refresh_task_row(i: int):
         if i < 0 or i >= len(state.tasks) or i >= len(row_widgets):
             return
         t = state.tasks[i]
         w = row_widgets[i]
+        w["selected_var"].set(bool(t.selected))
         name = compact_ui_text(_task_display_title(t, t.title), 24)
         w["kind"].configure(
             text=t.kind_label,
@@ -1485,6 +1616,10 @@ def build_gui():
         login_btn.configure(state=normal_or_disabled)
         collector_btn.configure(state=normal_or_disabled)
         update_btn.configure(state=normal_or_disabled)
+        select_all_btn.configure(state=normal_or_disabled)
+        select_none_btn.configure(state=normal_or_disabled)
+        for row in row_widgets:
+            row["selected"].configure(state=normal_or_disabled)
         stop_btn.configure(state="normal" if state.running else "disabled")
 
     def on_close() -> None:
@@ -1696,15 +1831,19 @@ def build_gui():
             url_group_names,
             url_replay_titles,
         )
+        previous_selection = {task.url: task.selected for task in state.tasks}
         state.tasks = [
             make_task_item(
                 u,
                 i,
-                url_group_names.get(u, ""),
-                url_replay_titles.get(u, ""),
+                _metadata_value(url_group_names, u),
+                _metadata_value(url_replay_titles, u),
             )
             for i, u in enumerate(urls)
         ]
+        for task in state.tasks:
+            if task.url in previous_selection:
+                task.selected = previous_selection[task.url]
         rebuild_task_rows()
         overall_lbl.configure(text=f"总进度: 0 / {len(state.tasks)}")
         overall_bar.set(0)
@@ -2043,28 +2182,52 @@ def build_gui():
             url_replay_titles,
         )
 
-        tasks = [
-            make_task_item(
-                u,
-                i,
-                url_group_names.get(u, ""),
-                url_replay_titles.get(u, ""),
-            )
-            for i, u in enumerate(urls)
-        ]
-        unknown_count = sum(1 for task in tasks if task.kind == KIND_UNKNOWN)
+        current_task_urls = [task.url for task in state.tasks]
+        if current_task_urls != urls:
+            state.tasks = [
+                make_task_item(
+                    u,
+                    i,
+                    _metadata_value(url_group_names, u),
+                    _metadata_value(url_replay_titles, u),
+                )
+                for i, u in enumerate(urls)
+            ]
+            rebuild_task_rows()
+        else:
+            # A title cache can be refreshed after the list was parsed. Apply
+            # only non-empty metadata so a temporary engine label never
+            # overwrites a verified DingTalk title.
+            for task in state.tasks:
+                group_name = _metadata_value(url_group_names, task.url)
+                replay_title = _metadata_value(url_replay_titles, task.url)
+                if group_name:
+                    task.group_name = group_name
+                if replay_title:
+                    task.replay_title = replay_title
+            for index in range(len(state.tasks)):
+                refresh_task_row(index)
+
+        tasks = list(state.tasks)
+        selected_tasks = [task for task in tasks if task.selected]
+        if not selected_tasks:
+            messagebox.showwarning("未选择任务", "请先在右侧任务列表勾选至少一个视频。")
+            log("未开始下载：当前没有勾选任务。")
+            return
+
+        unknown_count = sum(1 for task in selected_tasks if task.kind == KIND_UNKNOWN)
         if unknown_count:
             messagebox.showerror(
                 "不支持的链接",
                 f"有 {unknown_count} 条链接无法识别。\n"
                 "目前支持群回放、钉钉闪记和钉盘/群文件链接。",
             )
-            state.tasks = tasks
-            rebuild_task_rows()
             return
 
-        has_live = any(task.kind == KIND_LIVE for task in tasks)
-        has_media_tasks = any(task.kind in {KIND_SHANJI, KIND_YUNPAN} for task in tasks)
+        has_live = any(task.kind == KIND_LIVE for task in selected_tasks)
+        has_media_tasks = any(
+            task.kind in {KIND_SHANJI, KIND_YUNPAN} for task in selected_tasks
+        )
         godingtalk_ready = bool(exe_path and exe_path.is_file())
         mediago_ready = bool(mediago_path and mediago_path.is_file())
         ffmpeg_ready = bool(ffmpeg_path and ffmpeg_path.is_file())
@@ -2171,7 +2334,7 @@ def build_gui():
         state.running = True
         state.stop_flag = False
         state.overall_done = 0
-        state.overall_total = len(urls)
+        state.overall_total = len(selected_tasks)
         stop_event.clear()
         rebuild_task_rows()
         refresh_action_states()
@@ -2179,14 +2342,18 @@ def build_gui():
         start_btn.configure(state="disabled")
         stop_btn.configure(state="normal")
         parse_btn.configure(state="disabled")
-        overall_lbl.configure(text=f"总进度: 0 / {len(urls)}")
+        overall_lbl.configure(text=f"总进度: 0 / {len(selected_tasks)}")
         overall_bar.set(0)
-        log(f"开始下载 {len(urls)} 个任务 → {save_dir}")
+        log(
+            f"开始下载 {len(selected_tasks)} / {len(tasks)} 个已选任务 → {save_dir}"
+        )
 
         worker = DownloadWorker(
             godingtalk=exe_path,
             mediago=mediago_path,
             ffmpeg=ffmpeg_path,
+            # Pass the complete parsed list; the worker filters unchecked
+            # rows while retaining their original indices for GUI updates.
             tasks=list(state.tasks),
             save_dir=save_dir,
             cookies=COOKIES_FILE,

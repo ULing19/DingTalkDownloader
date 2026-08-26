@@ -200,6 +200,56 @@ class GuiDownloaderTests(unittest.TestCase):
             events.append(worker.event_q.get_nowait())
         finished = [event for event in events if event["kind"] == "finished"]
         self.assertEqual(finished[-1]["done"], 2)
+
+    def test_worker_downloads_only_checked_tasks_and_keeps_original_row_indices(self):
+        tasks = [
+            gui.make_task_item(
+                "https://n.dingtalk.com/dingding/live-room/index.html?"
+                f"roomId=r{index}&liveUuid=0000000{index}-1111-4111-8111-00000000000{index}",
+                index,
+            )
+            for index in range(3)
+        ]
+        tasks[1].selected = False
+        event_q = queue.Queue()
+        worker = gui.DownloadWorker(
+            godingtalk=None,
+            mediago=None,
+            ffmpeg=None,
+            tasks=tasks,
+            save_dir=Path("."),
+            cookies=Path("cookies.json"),
+            thread_count=1,
+            event_q=event_q,
+            stop_event=threading.Event(),
+        )
+
+        with mock.patch.object(
+            worker,
+            "_run_one",
+            side_effect=lambda index, task: (True, f"标题{index}", "", False),
+        ) as run_one:
+            worker.run()
+
+        self.assertEqual([call.args[0] for call in run_one.call_args_list], [0, 2])
+        events = []
+        while not event_q.empty():
+            events.append(event_q.get_nowait())
+        row_updates = [
+            event["index"]
+            for event in events
+            if event["kind"] == "task_update" and event.get("status") == "完成"
+        ]
+        self.assertEqual(sorted(row_updates), [0, 2])
+        finished = [event for event in events if event["kind"] == "finished"][-1]
+        self.assertEqual((finished["done"], finished["total"]), (2, 2))
+
+    def test_unchecked_task_defaults_to_selected_for_existing_import_flow(self):
+        task = gui.make_task_item(
+            "https://shanji.dingtalk.com/app/transcribes/demo_123", 0
+        )
+        self.assertTrue(task.selected)
+
     def test_extracts_markdown_and_plain_dingtalk_urls(self):
         text = """
         [闪记](https://shanji.dingtalk.com/app/transcribes/demo_123)
@@ -263,6 +313,24 @@ class GuiDownloaderTests(unittest.TestCase):
         self.assertTrue(
             all(key.startswith("sha256:") for key in settings["replay_metadata"])
         )
+
+    def test_replay_metadata_matches_copied_live_url_with_extra_parameters(self):
+        canonical = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            "roomId=room&liveUuid=00000000-0000-0000-0000-000000000001"
+        )
+        copied = canonical + "&cid=group-1&from=share#replay"
+        settings = {"destinations": {}}
+        gui._remember_replay_metadata(
+            settings,
+            {canonical: "测试群"},
+            {canonical: "群内原标题"},
+        )
+
+        groups, titles = gui._replay_metadata_maps(settings, [copied])
+
+        self.assertEqual(groups[copied], "测试群")
+        self.assertEqual(titles[copied], "群内原标题")
 
     def test_hydrate_replay_metadata_preserves_current_values_and_loads_cache(self):
         current = (

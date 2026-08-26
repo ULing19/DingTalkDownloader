@@ -185,6 +185,30 @@ class ReplayExtractorTests(unittest.TestCase):
 
         self.assertEqual(result.links[0].title, "钉钉群内的回放标题")
 
+    def test_url_pair_fallback_keeps_title_from_partial_record(self):
+        # A newer renderer may expose the title and live UUID but omit
+        # ``fromRoomId`` from the heap object. URL-pair validation still
+        # determines the link; the title should travel with that UUID.
+        partial = {
+            "cid": CID,
+            "liveUuid": UUID_1,
+            "title": "新版客户端的群内标题",
+            "publicLandingUrl": (
+                "https://h5.dingtalk.com/group-live-share/index.htm?"
+                f"encCid=abc123&liveUuid={UUID_1}"
+            ),
+            "jumpUrl": (
+                "https://n.dingtalk.com/dingding/live-room/index.html?"
+                f"roomId=roomOne&liveUuid={UUID_1}"
+            ),
+        }
+        payload = url_pair_payload([partial], 0)
+
+        result = parse_memory_chunks([payload], cid=CID)
+
+        self.assertEqual(result.links[0].live_uuid, UUID_1)
+        self.assertEqual(result.links[0].title, "新版客户端的群内标题")
+
     def test_groupsetting_navigation_supplies_group_name(self):
         with tempfile.TemporaryDirectory() as root:
             log_path = Path(root) / "cef_debug.log.test"

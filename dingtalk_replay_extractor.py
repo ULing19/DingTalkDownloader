@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from dingtalk_titles import extract_replay_title
+
 
 UUID_TEXT = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 ROOM_TEXT = r"[A-Za-z0-9_-]{1,80}"
@@ -421,20 +423,36 @@ def _record_timestamp(record: Dict[str, object]) -> int:
 def _record_title(record: Dict[str, object]) -> Optional[str]:
     """Return the replay title carried by a validated DingTalk record."""
 
-    raw_value = _first_value(
-        record,
-        "title",
-        "liveTitle",
-        "subject",
-        "liveName",
-        "name",
+    return extract_replay_title(record)
+
+
+def _loose_record_title(
+    record: object, cid: str
+) -> Optional[Tuple[str, str]]:
+    """Keep a title even when a new client omits one URL-pair field.
+
+    The strict record parser below deliberately requires the canonical and
+    public URLs to agree before it creates a replay link.  Some DingTalk
+    versions retain only ``liveUuid``/``title`` in a heap object, while the
+    corresponding URLs are exposed separately as URL strings.  Recording this
+    title by UUID is safe because the URL-pair fallback still validates the
+    group and both URLs before it can use the value.
+    """
+
+    if not isinstance(record, dict):
+        return None
+    raw_cid = _first_value(record, "cid", "conversationId", "groupId", "chatId")
+    if raw_cid not in (None, "") and str(raw_cid) != str(cid):
+        return None
+    live_uuid = _normalize_live_id(
+        str(_first_value(record, "liveUuid", "liveUUID", "liveId", "uuid"))
     )
-    if not isinstance(raw_value, str):
+    if not LIVE_ID_RE.fullmatch(live_uuid):
         return None
-    title = raw_value.strip()
-    if not title or len(title) > 512:
+    title = extract_replay_title(record)
+    if not title:
         return None
-    return title
+    return live_uuid, title
 
 
 def _balanced_json_end(data: bytes, start: int, max_span: int = 2 * 1024 * 1024) -> Optional[int]:
@@ -643,11 +661,13 @@ def _collect_memory_evidence(chunks: Iterable[bytes], cid: str) -> _MemoryEviden
         # omit the structured list response. Preserve an unambiguous title so
         # the URL-pair fallback can still use the DingTalk name.
         for record_value in _iter_json_objects(data, REPLAY_RECORD_START_RE):
+            loose_title = _loose_record_title(record_value, cid)
+            if loose_title is not None:
+                live_uuid, title = loose_title
+                evidence.record_titles.setdefault(live_uuid, set()).add(title)
             record = _parse_replay_record(record_value, cid)
             if record is not None and record.title:
-                evidence.record_titles.setdefault(record.live_uuid, set()).add(
-                    record.title
-                )
+                evidence.record_titles.setdefault(record.live_uuid, set()).add(record.title)
 
         for match in DINGTALK_URL_BYTES_RE.finditer(data):
             raw_url = match.group(0).decode("utf-8", "ignore")

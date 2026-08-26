@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import unquote
 
+from dingtalk_titles import extract_replay_title
+
 
 LWP_URL = "wss://webalfa-cm3.dingtalk.com/long"
 LIVE_APP_KEY = "5b46698304b45807569d343fcc5a2b61"
@@ -127,9 +129,18 @@ def _ended(value: Any) -> bool:
 
 
 def _timestamp(record: Mapping[str, Any]) -> int:
-    for key in ("datetime", "timestamp", "startTime", "createTime"):
+    for key in (
+        "datetime",
+        "timestamp",
+        "startTime",
+        "start_time",
+        "actualStartTime",
+        "liveStartTime",
+        "createTime",
+        "gmtCreate",
+    ):
         try:
-            value = int(record.get(key) or 0)
+            value = int(_record_value(record, key) or 0)
         except (TypeError, ValueError):
             continue
         if value:
@@ -137,12 +148,22 @@ def _timestamp(record: Mapping[str, Any]) -> int:
     return 0
 
 
-def _record_title(record: Mapping[str, Any]) -> str:
-    for key in ("title", "liveTitle", "subject", "liveName", "name"):
-        value = re.sub(r"\s+", " ", str(record.get(key) or "")).strip()
-        if value:
-            return value[:500]
+def _record_value(record: Mapping[str, Any], *names: str) -> Any:
+    """Read a record field across old/new RPC casing and alias spellings."""
+
+    for name in names:
+        if name in record and record[name] not in (None, ""):
+            return record[name]
+    wanted = {re.sub(r"[^a-z0-9]", "", name.casefold()) for name in names}
+    for key, value in record.items():
+        token = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+        if token in wanted and value not in (None, ""):
+            return value
     return ""
+
+
+def _record_title(record: Mapping[str, Any]) -> str:
+    return extract_replay_title(record) or ""
 
 
 def _parse_page(body: Mapping[str, Any], cid: str) -> tuple[List[RpcReplayRecord], bool]:
@@ -153,9 +174,17 @@ def _parse_page(body: Mapping[str, Any], cid: str) -> tuple[List[RpcReplayRecord
     for raw in raw_records:
         if not isinstance(raw, Mapping):
             raise DingTalkRpcError("钉钉回放记录格式无效")
-        record_cid = str(raw.get("cid") or "").strip()
-        room_id = str(raw.get("fromRoomId") or raw.get("roomId") or "").strip()
-        live_uuid = str(raw.get("liveUuid") or raw.get("liveUUID") or "").strip()
+        record_cid = str(
+            _record_value(raw, "cid", "conversationId", "groupId", "chatId")
+            or ""
+        ).strip()
+        room_id = str(
+            _record_value(raw, "fromRoomId", "roomId", "roomID", "sourceRoomId")
+            or ""
+        ).strip()
+        live_uuid = str(
+            _record_value(raw, "liveUuid", "liveUUID", "liveId", "uuid") or ""
+        ).strip()
         if record_cid != cid or not ID_RE.fullmatch(room_id) or not ID_RE.fullmatch(live_uuid):
             raise DingTalkRpcError("钉钉回放记录与目标群不一致")
         records.append(

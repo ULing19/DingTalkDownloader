@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title Build DingTalk GUI EXE 1.3.6
+title Build DingTalk GUI EXE 1.3.7
 
 set "BASE_PYTHON=python"
 if defined DTD_PYTHON set "BASE_PYTHON=%DTD_PYTHON%"
@@ -21,7 +21,10 @@ if defined DTD_PYTHON (
   )
 )
 
-set "BUILD_VENV=%CD%\build\pyinstaller-venv"
+rem PyInstaller 6.x can fail while disassembling Python 3.9 bytecode
+rem ("str object has no attribute opname"). Use the validated Python 3.13
+rem isolated environment by default; callers can still override DTD_BUILD_VENV.
+set "BUILD_VENV=%CD%\build\pyinstaller-venv-313"
 if defined DTD_BUILD_VENV set "BUILD_VENV=%DTD_BUILD_VENV%"
 set "PYTHON_EXE=%BUILD_VENV%\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (
@@ -54,11 +57,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "tools\assemble_release.ps1" -RootDir "%CD%" -Version "1.3.6"
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\assemble_release.ps1" -RootDir "%CD%" -Version "1.3.7"
 if errorlevel 1 (
   echo [ERROR] Release assembly failed
   pause
   exit /b 1
 )
-echo [OK] Release folder: dist\DingTalkDownloader_1.3.6
+echo [OK] Release folder: dist\DingTalkDownloader_1.3.7
 endlocal

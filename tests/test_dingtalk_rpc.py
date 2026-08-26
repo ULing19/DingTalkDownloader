@@ -79,6 +79,34 @@ class DingTalkRpcTests(unittest.TestCase):
         self.assertEqual([item["body"][0]["index"] for item in requests], [0, 10])
         self.assertEqual({item["body"][0]["cid"] for item in requests}, {cid})
 
+    def test_accepts_new_record_aliases_without_losing_title(self):
+        raw = _record(7)
+        raw.pop("cid")
+        raw.pop("fromRoomId")
+        raw.pop("liveUuid")
+        raw["conversationId"] = TEST_CID
+        raw["roomID"] = "room007"
+        raw["liveUUID"] = "live-007"
+        fake = _FakeSocket(
+            [
+                {"headers": {"mid": "0 0"}, "code": 200},
+                {
+                    "headers": {"mid": "5101001 0"},
+                    "body": {"records": [raw], "isEnd": 1},
+                },
+            ]
+        )
+        with tempfile.TemporaryDirectory() as root:
+            records = list_live_records(
+                TEST_CID,
+                self._cookies(root),
+                websocket_factory=lambda *args, **kwargs: fake,
+            )
+
+        self.assertEqual(records[0].room_id, "room007")
+        self.assertEqual(records[0].live_uuid, "live-007")
+        self.assertEqual(records[0].title, "回放 7")
+
     def test_session_probe_only_registers_and_closes(self):
         fake = _FakeSocket([{"headers": {"mid": "0 0"}, "code": 200}])
         with tempfile.TemporaryDirectory() as root:
