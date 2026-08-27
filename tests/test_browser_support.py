@@ -124,6 +124,42 @@ class BrowserSupportTests(unittest.TestCase):
 
             self.assertEqual(browser, LoginBrowser("Microsoft Edge", edge.resolve()))
 
+    def test_excluded_browser_is_not_reselected_for_single_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            program_files = Path(root) / "Program Files"
+            edge = _touch(
+                program_files / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+            )
+            chrome = _touch(
+                program_files / "Google" / "Chrome" / "Application" / "chrome.exe"
+            )
+            lookup = lambda _names: ()
+            missing = lambda _name: None
+
+            fallback_from_chrome = find_login_browser(
+                chrome,
+                excluded_paths=(chrome,),
+                env={"PROGRAMFILES": str(program_files)},
+                registry_lookup=lookup,
+                which_lookup=missing,
+            )
+            fallback_from_edge = find_login_browser(
+                edge,
+                excluded_paths=(edge,),
+                env={"PROGRAMFILES": str(program_files)},
+                registry_lookup=lookup,
+                which_lookup=missing,
+            )
+
+            self.assertEqual(
+                fallback_from_chrome,
+                LoginBrowser("Microsoft Edge", edge.resolve()),
+            )
+            self.assertEqual(
+                fallback_from_edge,
+                LoginBrowser("Google Chrome", chrome.resolve()),
+            )
+
     def test_edge_can_be_found_through_registered_app_path(self):
         with tempfile.TemporaryDirectory() as root:
             edge = _touch(Path(root) / "registered" / "msedge.exe")
@@ -251,10 +287,240 @@ class BrowserSupportTests(unittest.TestCase):
             )
             try:
                 self.assertIn("--remote-allow-origins=*", captured["command"])
+                self.assertIn("--new-window", captured["command"])
                 self.assertEqual(captured["command"][-1], browser_support.LOGIN_URL)
                 self.assertEqual(captured["kwargs"]["cwd"], str(process._profile))
             finally:
                 process.terminate()
+
+    def test_cookie_reader_requests_only_dingtalk_urls(self):
+        target = {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/one"}
+        response = {
+            "cookies": [
+                {
+                    "name": "account",
+                    "value": "account-id",
+                    "domain": ".dingtalk.com",
+                    "path": "/",
+                },
+                {
+                    "name": "MUID",
+                    "value": "browser-id",
+                    "domain": ".bing.com",
+                    "path": "/",
+                },
+            ]
+        }
+        with mock.patch.object(browser_support, "_cdp_call", return_value=response) as call:
+            cookies = browser_support._cookies_from_target(target)
+
+        self.assertEqual(cookies, {"account": "account-id"})
+        call.assert_called_once_with(
+            target["webSocketDebuggerUrl"],
+            "Network.getCookies",
+            {"urls": list(browser_support._DINGTALK_COOKIE_URLS)},
+        )
+
+    def test_cookie_reader_prefers_live_cookie_and_ignores_empty_duplicate(self):
+        cookies = browser_support._flatten_dingtalk_cookies(
+            [
+                {
+                    "name": "LV_PC_SESSION",
+                    "value": "login-session",
+                    "domain": "login.dingtalk.com",
+                    "path": "/",
+                },
+                {
+                    "name": "LV_PC_SESSION",
+                    "value": "live-session",
+                    "domain": "lv.dingtalk.com",
+                    "path": "/",
+                },
+                {
+                    "name": "LV_PC_SESSION",
+                    "value": "path-session",
+                    "domain": "lv.dingtalk.com",
+                    "path": "/sso/login",
+                },
+                {
+                    "name": "LV_PC_SESSION",
+                    "value": "",
+                    "domain": "lv.dingtalk.com",
+                    "path": "/specific",
+                },
+                {
+                    "name": "deviceid",
+                    "value": "device-id",
+                    "domain": ".dingtalk.com",
+                    "path": "/",
+                },
+                {
+                    "name": "deviceid",
+                    "value": "unrelated",
+                    "domain": ".example.com",
+                    "path": "/",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            cookies,
+            {"LV_PC_SESSION": "live-session", "deviceid": "device-id"},
+        )
+
+    def test_monitor_accepts_login_from_second_page_after_launcher_exits(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        child = mock.Mock()
+        child.pid = 79
+        child.poll.return_value = 0
+        targets = [
+            {"url": "about:blank", "webSocketDebuggerUrl": "ws://blank"},
+            {
+                "url": "https://lv.dingtalk.com/sso/login",
+                "webSocketDebuggerUrl": "ws://live",
+            },
+        ]
+        valid = {
+            "account": "account-id",
+            "deviceid": "device-id",
+            "LV_PC_SESSION": "live-session",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            cookie_file = Path(root) / "cookies.json"
+            process = ChromiumLoginProcess(
+                browser,
+                cookies_file=cookie_file,
+                popen=lambda *_args, **_kwargs: child,
+                temp_root=Path(root) / "profile",
+                start_monitor=False,
+            )
+            with mock.patch.object(
+                browser_support, "_page_targets", return_value=targets
+            ), mock.patch.object(
+                browser_support,
+                "_cookies_from_target",
+                side_effect=[{}, valid],
+            ), mock.patch.object(browser_support, "_close_debug_browser") as close_browser:
+                process._monitor()
+
+            self.assertEqual(process.poll(), 0)
+            close_browser.assert_called_once_with(process._port)
+            self.assertEqual(
+                browser_support.json.loads(cookie_file.read_text(encoding="utf-8")),
+                valid,
+            )
+
+    def test_monitor_fails_when_dingtalk_page_closes_but_blank_page_remains(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        child = mock.Mock()
+        child.pid = 80
+        child.poll.return_value = 0
+        dingtalk = {
+            "url": "https://login.dingtalk.com/oauth2/challenge.htm",
+            "webSocketDebuggerUrl": "ws://login",
+        }
+        blank = {"url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}
+
+        with tempfile.TemporaryDirectory() as root:
+            process = ChromiumLoginProcess(
+                browser,
+                cookies_file=Path(root) / "cookies.json",
+                popen=lambda *_args, **_kwargs: child,
+                temp_root=Path(root) / "profile",
+                start_monitor=False,
+            )
+            with mock.patch.object(
+                browser_support,
+                "_page_targets",
+                side_effect=[[dingtalk], [blank]],
+            ), mock.patch.object(
+                browser_support, "_cookies_from_target", return_value={}
+            ), mock.patch.object(
+                browser_support, "_AUTH_PAGE_CLOSE_GRACE_SECONDS", 0.0
+            ), mock.patch.object(
+                browser_support, "_close_debug_browser"
+            ), mock.patch.object(browser_support.time, "sleep"):
+                process._monitor()
+
+            self.assertEqual(process.poll(), 1)
+            self.assertIn("钉钉授权页面已关闭", process.error)
+
+    def test_monitor_fails_when_browser_stays_on_initial_blank_page(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        child = mock.Mock()
+        child.pid = 82
+        child.poll.return_value = 0
+        blank = {"url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}
+
+        with tempfile.TemporaryDirectory() as root:
+            process = ChromiumLoginProcess(
+                browser,
+                cookies_file=Path(root) / "cookies.json",
+                popen=lambda *_args, **_kwargs: child,
+                temp_root=Path(root) / "profile",
+                start_monitor=False,
+            )
+            with mock.patch.object(
+                browser_support, "_page_targets", return_value=[blank]
+            ), mock.patch.object(
+                browser_support, "_cookies_from_target", return_value={}
+            ), mock.patch.object(
+                browser_support, "_AUTH_PAGE_OPEN_GRACE_SECONDS", 0.0
+            ), mock.patch.object(
+                browser_support, "_close_debug_browser"
+            ), mock.patch.object(browser_support.time, "sleep"):
+                process._monitor()
+
+            self.assertEqual(process.poll(), 1)
+            self.assertIn("未能打开钉钉授权页面", process.error)
+
+    def test_monitor_allows_transient_page_swap_during_login_redirect(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        child = mock.Mock()
+        child.pid = 81
+        child.poll.return_value = 0
+        dingtalk = {
+            "url": "https://login.dingtalk.com/oauth2/challenge.htm",
+            "webSocketDebuggerUrl": "ws://login",
+        }
+        redirected = {
+            "url": "https://lv.dingtalk.com/sso/login",
+            "webSocketDebuggerUrl": "ws://live",
+        }
+        blank = {"url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}
+        valid = {
+            "account": "account-id",
+            "deviceid": "device-id",
+            "LV_PC_SESSION": "live-session",
+        }
+
+        with tempfile.TemporaryDirectory() as root:
+            cookie_file = Path(root) / "cookies.json"
+            process = ChromiumLoginProcess(
+                browser,
+                cookies_file=cookie_file,
+                popen=lambda *_args, **_kwargs: child,
+                temp_root=Path(root) / "profile",
+                start_monitor=False,
+            )
+            with mock.patch.object(
+                browser_support,
+                "_page_targets",
+                side_effect=[[dingtalk], [blank], [redirected]],
+            ), mock.patch.object(
+                browser_support,
+                "_cookies_from_target",
+                side_effect=[{}, valid],
+            ), mock.patch.object(
+                browser_support, "_close_debug_browser"
+            ), mock.patch.object(browser_support.time, "sleep"):
+                process._monitor()
+
+            self.assertEqual(process.poll(), 0)
+            self.assertEqual(
+                browser_support.json.loads(cookie_file.read_text(encoding="utf-8")),
+                valid,
+            )
 
     def test_cdp_login_process_rejects_duplicate_active_session(self):
         browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))

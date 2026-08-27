@@ -45,7 +45,13 @@
 - 支持受限的多视频并发：分别控制单视频分片线程和同时下载的视频数量，避免无限制占满带宽；
 - 后台检查 GitHub 最新 Release，用户确认后下载并校验 SHA-256，再启动安装版或绿色版更新流程。
 
-### 1.3.7 标题一致性与选择下载更新
+### 1.3.8 登录目录与多浏览器兼容更新
+
+- 安装版和绿色版都会预置程序目录下的 `.goDingtalkConfig\config.json` 与 `cookies.json`，内容固定为空 JSON；首次运行也会自动修复缺失或 0 字节占位文件。实际登录态仍保存在当前 Windows 用户目录，发布包不会携带任何真实 Cookie。
+- 登录态不再回退到可能被系统清理的临时目录；会优先复用其它持久目录中已有的有效会话，并可将旧版程序目录的有效 Cookie 迁移到用户目录，不覆盖任何非空会话。
+- 软件唤起独立浏览器授权窗口并扫描其中的全部页面；兼容浏览器启动器提前退出、页面跳转以及多个 Edge/Chrome 窗口同时在线，只读取钉钉域 Cookie。已记忆浏览器无法打开授权页时只会自动换一个已安装浏览器重试一次，不会循环拉起窗口。
+
+### 1.3.7 标题一致性与选择下载更新（历史）
 
 - 自动采集的回放标题会从新版/旧版钉钉记录的顶层字段、嵌套字段和 URL 配对回退数据中统一提取，任务列表与最终文件名优先使用群直播原标题；标题缓存支持参数顺序变化和 1.3.6 旧格式迁移。
 - 点击“解析到任务列表”后，每条任务前都有勾选框；可以只勾选需要的视频，也可以使用“全选”“全不选”，未勾选项目不会启动下载。
@@ -140,20 +146,24 @@
 
 ### 方式一：安装版（推荐）
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.7_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.8_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.7_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.8_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
 GoDingtalk_v2.5.2_windows_amd64.exe
 mediago.exe
 ffmpeg.exe
+.goDingtalkConfig\config.json
+.goDingtalkConfig\cookies.json
 ```
+
+压缩包中的两个 JSON 只是 `{}` 占位文件，不含账号数据。软件授权后的真实登录态仍保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，因此不要手动把真实 Cookie 填入绿色包再转发。
 
 绿色版的卸载方式是退出程序后删除解压目录；删除前请备份 `video\`。若要同时清除登录状态，请删除 `%LOCALAPPDATA%\DingTalkDownloader`；若还要清除采集器的标题映射和保存目录记录，请一并删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector`。
 
@@ -258,15 +268,15 @@ video\                         # 默认输出目录（本地数据）
 
 **提示“未找到下载引擎”**：确认主程序、GoDingtalk、MediaGo 和 FFmpeg 在同一目录，并检查安全软件是否隔离了其中的文件。
 
-**没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.6`。程序会优先寻找 Microsoft Edge；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
+**没有安装 Google Chrome，点击“重新登录”失败**：升级到 `1.3.8`。程序会优先寻找 Microsoft Edge；若电脑精简系统中也没有 Edge，请安装任一 Chromium 浏览器或按提示选择其可执行文件。Firefox 不能代替 Chromium 完成自动登录。
 
-**登录窗口停在 `about:blank` 或浏览器没有打开**：升级到 `1.3.6`，退出旧版下载器后再次点击“重新登录”。新版会用独立临时窗口直接打开钉钉授权页，并处理新版 Chromium 的 DevTools Origin 校验；不要连续点击按钮，也不要手动关闭授权窗口直到软件提示结果。
+**登录窗口停在 `about:blank`、浏览器没有打开或同时打开多个浏览器后无法识别登录**：升级到 `1.3.8`，退出旧版下载器后再次点击“重新登录”。只需在软件唤起的独立授权窗口中完成操作，其它浏览器无需关闭；记忆的浏览器失效时软件最多再换一个浏览器重试，不会连续打开大量窗口。
 
-**首次运行提示找不到 Cookie**：不需要手动创建或复制 Cookie。1.3.6 会先在可写的用户目录创建空的 `config.json` 和 `cookies.json`，授权完成后自动写入；若默认 `%LOCALAPPDATA%` 被策略重定向，日志会显示实际使用的备用目录。
+**首次运行提示找不到 Cookie**：不需要手动创建或复制 Cookie。1.3.8 的安装版和绿色版都包含程序目录空占位文件，程序还会在可写的用户目录准备真实会话文件，授权完成后自动写入；若默认 `%LOCALAPPDATA%` 被策略重定向，日志会显示实际使用的持久备用目录。
 
-**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 `1.3.6`，并粘贴完整原始链接。
+**提示“缺少 roomId 或 liveUuid”**：不要把闪记或群文件 URL 当成直播 URL；升级到 `1.3.8`，并粘贴完整原始链接。
 
-**浏览器授权成功，但点击下载又反复要求登录**：升级到 `1.3.6`。新版会等待会话完整写入，并让登录、MediaGo 与 GoDingtalk 兼容回退共用 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\cookies.json`；下载前只进行一次在线校验，断网不会误判成掉登录。授权时只保留软件唤起的浏览器窗口，等待软件提示“登录成功”后再操作；不要发送 Cookie 内容。
+**浏览器授权成功，但点击下载又反复要求登录**：升级到 `1.3.8`。新版会等待会话完整写入，优先复用已有的持久会话，并让登录、MediaGo 与 GoDingtalk 兼容回退共用同一份 `cookies.json`；下载前只进行一次在线校验，断网不会误判成掉登录。等待软件提示“登录成功”后再操作，不要发送 Cookie 内容。
 
 **闪记提示缺少 `account/access_token` 或 `deviceid`**：登录会话不完整或已过期。点击“重新登录”，并确认同一账号能在浏览器打开闪记页面。
 
@@ -302,4 +312,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.7`。
+当前 GUI/安装包版本：`1.3.8`。

@@ -38,6 +38,7 @@ class SessionPreparation:
     paths: SessionPaths
     migrated_files: tuple[str, ...] = ()
     fallback_used: bool = False
+    legacy_compatibility_prepared: bool = False
 
 
 def resolve_session_paths(
@@ -109,22 +110,25 @@ def _session_candidates(
     # a few enterprise launchers omit it), but is deliberately after the
     # explicit environment value so tests and redirected profiles remain
     # deterministic.
-    try:
-        home = Path.home()
-    except (OSError, RuntimeError):
-        home = None
-    if home is not None:
-        roots.append(home / "AppData" / "Local")
+    if not profile:
+        try:
+            home = Path.home()
+        except (OSError, RuntimeError):
+            home = None
+        if home is not None:
+            roots.append(home / "AppData" / "Local")
+
+    roaming_app_data = _env_value(env, "APPDATA")
+    if roaming_app_data:
+        roots.append(Path(roaming_app_data))
 
     # The application directory remains a valid choice for a genuinely
     # portable build. It is tried after per-user locations so an installed
     # copy under Program Files never receives a partially writable session.
     roots.append(app_dir)
-    temp_root = _env_value(env, "TEMP") or _env_value(env, "TMP")
-    if temp_root:
-        roots.append(Path(temp_root))
-
-    seen: set[str] = set()
+    # A temporary directory is deliberately not a fallback: cleanup tools may
+    # remove it between runs and make a successfully saved login appear lost.
+    seen: set[str] = {str(primary.config_dir).casefold()}
     for root in roots:
         candidate_dir = root / "DingTalkDownloader" / ".goDingtalkConfig"
         if root == app_dir:
@@ -150,8 +154,35 @@ def _select_writable_session_paths(
     env: Mapping[str, str],
 ) -> tuple[SessionPaths, bool]:
     primary = resolve_session_paths(app_dir, env=env)
+    candidates = _session_candidates(app_dir, primary, env)
     errors: list[str] = []
-    for index, candidate in enumerate(_session_candidates(app_dir, primary, env)):
+    unwritable: set[int] = set()
+
+    # A previous run may have selected a fallback while LOCALAPPDATA was
+    # unavailable. If the preferred directory later becomes writable again,
+    # do not silently switch to its empty placeholder and lose that session.
+    for index, candidate in enumerate(candidates):
+        # Treat a distinct app-local directory as a migration source. Real
+        # cookies should move into stable per-user storage while the original
+        # file remains available as a recovery copy.
+        if (
+            candidate.config_dir == primary.legacy_dir
+            and primary.config_dir != primary.legacy_dir
+        ):
+            continue
+        if not validate_dingtalk_session(candidate.cookies_file).valid:
+            continue
+        try:
+            _verify_writable_directory(candidate.config_dir)
+        except OSError as exc:
+            errors.append(f"{candidate.config_dir}: {exc}")
+            unwritable.add(index)
+            continue
+        return candidate, index > 0
+
+    for index, candidate in enumerate(candidates):
+        if index in unwritable:
+            continue
         try:
             _verify_writable_directory(candidate.config_dir)
         except OSError as exc:
@@ -208,6 +239,63 @@ def _ensure_json_placeholder(path: Path) -> None:
             pass
 
 
+def _is_empty_json_placeholder(path: Path) -> bool:
+    """Return whether *path* is a replaceable zero-byte or ``{}`` file."""
+
+    try:
+        if not path.is_file():
+            return False
+        if path.stat().st_size == 0:
+            return True
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and not payload
+
+
+def _migration_destination_allows_replace(
+    name: str,
+    destination: Path,
+    staged_source: Optional[Path] = None,
+) -> bool:
+    try:
+        exists = destination.exists()
+    except OSError:
+        return False
+    if not exists:
+        return True
+    if name != "cookies.json" or not _is_empty_json_placeholder(destination):
+        return False
+    source = staged_source
+    return source is not None and validate_dingtalk_session(source).valid
+
+
+def _prepare_legacy_compatibility(paths: SessionPaths) -> bool:
+    """Best-effort app-local placeholders for bundled/older engines.
+
+    The per-user directory remains authoritative because installed locations
+    may be read-only.  Keeping valid empty JSON files beside the executable
+    makes fresh installer and portable layouts predictable without copying a
+    real login session into a more easily shared application directory.
+    """
+
+    try:
+        if paths.config_dir.resolve() == paths.legacy_dir.resolve():
+            return True
+    except OSError:
+        if paths.config_dir == paths.legacy_dir:
+            return True
+    try:
+        paths.legacy_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_json_placeholder(paths.legacy_dir / "config.json")
+        _ensure_json_placeholder(paths.legacy_dir / "cookies.json")
+    except OSError:
+        # Program Files and managed folders can legitimately be read-only.
+        # Login still works through the selected per-user session directory.
+        return False
+    return True
+
+
 def prepare_session_storage(
     app_dir: Path | str,
     *,
@@ -233,16 +321,35 @@ def prepare_session_storage(
     if same_directory:
         _ensure_json_placeholder(paths.config_file)
         _ensure_json_placeholder(paths.cookies_file)
-        return SessionPreparation(paths, fallback_used=fallback_used)
+        return SessionPreparation(
+            paths,
+            fallback_used=fallback_used,
+            legacy_compatibility_prepared=True,
+        )
 
     for name in ("config.json", "cookies.json"):
         source = paths.legacy_dir / name
         destination = paths.config_dir / name
-        if destination.exists() or not source.is_file():
+        if not source.is_file():
+            continue
+        if destination.exists() and (
+            name != "cookies.json"
+            or not _is_empty_json_placeholder(destination)
+            or not validate_dingtalk_session(source).valid
+        ):
             continue
         temporary = paths.config_dir / f".{name}.{os.getpid()}.tmp"
         try:
             shutil.copy2(source, temporary)
+            # Re-check after staging so a concurrently written real session is
+            # never replaced by migration. The application is single-instance,
+            # but this also protects installer/launcher races.
+            if not _migration_destination_allows_replace(
+                name,
+                destination,
+                temporary,
+            ):
+                continue
             os.replace(temporary, destination)
             migrated.append(name)
         finally:
@@ -252,7 +359,13 @@ def prepare_session_storage(
                 pass
     _ensure_json_placeholder(paths.config_file)
     _ensure_json_placeholder(paths.cookies_file)
-    return SessionPreparation(paths, tuple(migrated), fallback_used)
+    legacy_prepared = _prepare_legacy_compatibility(paths)
+    return SessionPreparation(
+        paths,
+        tuple(migrated),
+        fallback_used,
+        legacy_prepared,
+    )
 
 
 def validate_dingtalk_session(path: Path | str) -> SessionStatus:

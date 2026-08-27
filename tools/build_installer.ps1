@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.7'
+    [string]$Version = '1.3.8'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,7 +15,9 @@ $required = @(
     'DingTalkDownloader.exe',
     'GoDingtalk_v2.5.2_windows_amd64.exe',
     'ffmpeg.exe',
-    'mediago.exe'
+    'mediago.exe',
+    '.goDingtalkConfig\config.json',
+    '.goDingtalkConfig\cookies.json'
 )
 $needsBuild = -not (Test-Path -LiteralPath $portable -PathType Leaf)
 foreach ($name in $required) {

@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -52,6 +53,16 @@ LOGIN_URL = (
     "https%253A%252F%252Fh5.dingtalk.com%252Fgroup-live-share%252Findex.htm%253Ftype%253D2%2523%252F"
 )
 _LOGIN_SUCCESS_HOSTS = {"h5.dingtalk.com", "lv.dingtalk.com"}
+_DINGTALK_COOKIE_URLS = (
+    "https://lv.dingtalk.com/",
+    "https://lv.dingtalk.com/sso/login",
+    "https://h5.dingtalk.com/",
+    "https://h5.dingtalk.com/group-live-share/index.htm",
+    "https://login.dingtalk.com/",
+)
+_PRIMARY_COOKIE_HOST = "lv.dingtalk.com"
+_AUTH_PAGE_OPEN_GRACE_SECONDS = 15.0
+_AUTH_PAGE_CLOSE_GRACE_SECONDS = 5.0
 _ACTIVE_LOGIN_LOCK = threading.Lock()
 _ACTIVE_LOGIN: Optional["ChromiumLoginProcess"] = None
 
@@ -269,6 +280,15 @@ def _usable_executable(path: Path) -> bool:
         return False
 
 
+def _executable_identity(path: Path | str) -> str:
+    candidate = Path(path).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        candidate = candidate.absolute()
+    return str(candidate).casefold()
+
+
 def login_browser_from_path(
     path: Path | str, display_name: Optional[str] = None
 ) -> Optional[LoginBrowser]:
@@ -308,14 +328,19 @@ def login_browser_from_path(
 def find_login_browser(
     configured_path: Path | str | None = None,
     *,
+    excluded_paths: Sequence[Path | str] = (),
     env: Optional[Mapping[str, str]] = None,
     registry_lookup: Optional[Callable[[Sequence[str]], Iterable[Path]]] = None,
     which_lookup: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Optional[LoginBrowser]:
     """Find a login browser, preferring Edge on Windows when no path is saved."""
+    excluded = {_executable_identity(path) for path in excluded_paths}
     if configured_path:
         configured = login_browser_from_path(configured_path)
-        if configured is not None:
+        if (
+            configured is not None
+            and _executable_identity(configured.executable) not in excluded
+        ):
             return configured
 
     environment = os.environ if env is None else env
@@ -343,7 +368,10 @@ def find_login_browser(
                 continue
             seen.add(identity)
             browser = login_browser_from_path(candidate, spec.display_name)
-            if browser is not None:
+            if (
+                browser is not None
+                and _executable_identity(browser.executable) not in excluded
+            ):
                 return browser
     return None
 
@@ -401,6 +429,29 @@ def _page_targets(port: int) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict) and item.get("type") == "page"]
 
 
+def _target_host(target: Mapping[str, Any]) -> str:
+    try:
+        return urllib.parse.urlparse(str(target.get("url") or "")).hostname.casefold()
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def _close_debug_browser(port: int) -> None:
+    """Close only the isolated browser attached to this login's CDP port."""
+
+    try:
+        payload = _json_request(f"http://127.0.0.1:{port}/json/version", timeout=0.75)
+        websocket_url = str(
+            payload.get("webSocketDebuggerUrl") if isinstance(payload, Mapping) else ""
+        )
+        if websocket_url:
+            _cdp_call(websocket_url, "Browser.close")
+    except Exception:
+        # The browser may already be gone. Process-tree cleanup remains the
+        # fallback and is scoped to the launcher started by this application.
+        pass
+
+
 def _cdp_call(websocket_url: str, method: str, params: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
     if websocket is None:
         raise LoginLaunchError("登录组件缺少 websocket-client 依赖，请重新安装软件。")
@@ -434,22 +485,58 @@ def _cdp_call(websocket_url: str, method: str, params: Optional[Mapping[str, Any
         connection.close()
 
 
+def _is_dingtalk_cookie_domain(value: object) -> bool:
+    domain = str(value or "").strip().lstrip(".").casefold()
+    return domain == "dingtalk.com" or domain.endswith(".dingtalk.com")
+
+
+def _cookie_applies_to_host(domain: str, host: str) -> bool:
+    normalized = domain.strip().lstrip(".").casefold()
+    wanted = host.strip().rstrip(".").casefold()
+    return wanted == normalized or wanted.endswith(f".{normalized}")
+
+
+def _flatten_dingtalk_cookies(cookies: object) -> dict[str, str]:
+    if not isinstance(cookies, list):
+        return {}
+
+    selected: dict[str, tuple[tuple[int, int, int, int, str], str]] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        domain = str(cookie.get("domain") or "").strip()
+        if not _is_dingtalk_cookie_domain(domain):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        value = str(cookie.get("value") or "").strip()
+        if not name or not value:
+            continue
+
+        normalized_domain = domain.lstrip(".").casefold()
+        path = str(cookie.get("path") or "/")
+        priority = (
+            int(_cookie_applies_to_host(normalized_domain, _PRIMARY_COOKIE_HOST)),
+            int(normalized_domain == _PRIMARY_COOKIE_HOST),
+            int(path == "/"),
+            -len(path),
+            normalized_domain,
+        )
+        previous = selected.get(name)
+        if previous is None or priority > previous[0]:
+            selected[name] = (priority, value)
+    return {name: item[1] for name, item in selected.items()}
+
+
 def _cookies_from_target(target: Mapping[str, Any]) -> dict[str, str]:
     ws_url = str(target.get("webSocketDebuggerUrl") or "")
     if not ws_url:
         return {}
-    result = _cdp_call(ws_url, "Network.getAllCookies")
-    cookies = result.get("cookies")
-    if not isinstance(cookies, list):
-        return {}
-    values: dict[str, str] = {}
-    for cookie in cookies:
-        if not isinstance(cookie, Mapping):
-            continue
-        name = str(cookie.get("name") or "").strip()
-        if name:
-            values[name] = str(cookie.get("value") or "")
-    return values
+    result = _cdp_call(
+        ws_url,
+        "Network.getCookies",
+        {"urls": list(_DINGTALK_COOKIE_URLS)},
+    )
+    return _flatten_dingtalk_cookies(result.get("cookies"))
 
 
 def _has_login_material(cookies: Mapping[str, str]) -> bool:
@@ -504,6 +591,7 @@ class ChromiumLoginProcess:
             str(self.browser.executable),
             "--no-first-run",
             "--no-default-browser-check",
+            "--new-window",
             "--disable-background-networking",
             "--disable-popup-blocking",
             "--disable-sync",
@@ -559,6 +647,7 @@ class ChromiumLoginProcess:
         self._return_code = int(code)
         self._error = error
         self._stop.set()
+        _close_debug_browser(self._port)
         try:
             if self._child.poll() is None:
                 if os.name == "nt" and self.pid:
@@ -587,31 +676,42 @@ class ChromiumLoginProcess:
         deadline = time.monotonic() + self.timeout_seconds
         try:
             ready_deadline = time.monotonic() + 30
+            ready_targets: list[dict[str, Any]] = []
             while not self._stop.is_set() and time.monotonic() < ready_deadline:
-                if self._child.poll() is not None:
-                    self._finish(1, "浏览器登录进程提前退出，请检查浏览器权限或安全软件拦截。")
-                    return
-                if _page_targets(self._port):
+                ready_targets = _page_targets(self._port)
+                if ready_targets:
                     break
+                if self._child.poll() is not None:
+                    # Some Chromium launchers hand the isolated profile to a
+                    # different process and then exit. Give the DevTools
+                    # endpoint a short grace period before reporting failure.
+                    time.sleep(0.25)
+                    continue
                 time.sleep(0.25)
             else:
                 if self._stop.is_set():
                     self._finish(1, "登录已取消。")
                 else:
-                    self._finish(1, "浏览器调试接口未能启动，请关闭正在运行的浏览器后重试。")
+                    self._finish(1, "浏览器调试接口未能启动，请确认所选浏览器允许打开独立授权窗口。")
                 return
 
+            saw_dingtalk_target = any(
+                _is_dingtalk_cookie_domain(_target_host(target))
+                for target in ready_targets
+            )
+            dingtalk_target_open_deadline = (
+                None
+                if saw_dingtalk_target
+                else time.monotonic() + _AUTH_PAGE_OPEN_GRACE_SECONDS
+            )
+            dingtalk_target_missing_since: Optional[float] = None
             while not self._stop.is_set() and time.monotonic() < deadline:
                 targets = _page_targets(self._port)
+                has_dingtalk_target = False
                 for target in targets:
-                    url = str(target.get("url") or "")
-                    parsed_host = ""
-                    try:
-                        from urllib.parse import urlparse
-
-                        parsed_host = urlparse(url).netloc.casefold().split(":", 1)[0]
-                    except Exception:
-                        pass
+                    parsed_host = _target_host(target)
+                    if _is_dingtalk_cookie_domain(parsed_host):
+                        has_dingtalk_target = True
                     try:
                         cookies = _cookies_from_target(target)
                     except Exception:
@@ -624,7 +724,27 @@ class ChromiumLoginProcess:
                             _write_cookie_file(self.cookies_file, cookies)
                             self._finish(0)
                             return
-                if self._child.poll() is not None:
+                if has_dingtalk_target:
+                    saw_dingtalk_target = True
+                    dingtalk_target_open_deadline = None
+                    dingtalk_target_missing_since = None
+                elif saw_dingtalk_target:
+                    now = time.monotonic()
+                    if dingtalk_target_missing_since is None:
+                        dingtalk_target_missing_since = now
+                    if (
+                        now - dingtalk_target_missing_since
+                        >= _AUTH_PAGE_CLOSE_GRACE_SECONDS
+                    ):
+                        self._finish(1, "钉钉授权页面已关闭，登录未完成。")
+                        return
+                elif (
+                    dingtalk_target_open_deadline is not None
+                    and time.monotonic() >= dingtalk_target_open_deadline
+                ):
+                    self._finish(1, "浏览器未能打开钉钉授权页面。")
+                    return
+                if self._child.poll() is not None and not targets:
                     self._finish(1, "浏览器登录窗口已关闭，登录未完成。")
                     return
                 time.sleep(1.0)

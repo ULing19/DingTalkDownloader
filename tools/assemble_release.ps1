@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.7'
+    [string]$Version = '1.3.8'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,9 +102,22 @@ try {
         )
     }
 
-    New-Item -ItemType Directory -Force -Path `
-        (Join-Path $release 'video'), `
-        (Join-Path $release '.goDingtalkConfig') | Out-Null
+    # Every distribution starts with parseable placeholders. Generate them
+    # here instead of copying the developer's ignored local session files.
+    $emptyJson = "{}$([Environment]::NewLine)"
+    foreach ($target in @($release, $stage)) {
+        $configDir = Join-Path $target '.goDingtalkConfig'
+        New-Item -ItemType Directory -Force -Path `
+            (Join-Path $target 'video'), `
+            $configDir | Out-Null
+        foreach ($name in @('config.json', 'cookies.json')) {
+            [IO.File]::WriteAllText(
+                (Join-Path $configDir $name),
+                $emptyJson,
+                $utf8NoBom
+            )
+        }
+    }
 
     $portable = Join-Path $release "DingTalkDownloader_${Version}_Portable.zip"
     & (Join-Path $root 'tools\make_release_zip.ps1') -SourceDir $stage -Destination $portable

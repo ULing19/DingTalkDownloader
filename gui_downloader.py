@@ -1996,7 +1996,12 @@ def build_gui():
         else:
             subprocess.Popen(["xdg-open", str(d)])
 
-    def do_login(resume_download: bool = False):
+    def do_login(
+        resume_download: bool = False,
+        *,
+        browser_override: Optional[Any] = None,
+        attempted_browser_paths: Tuple[Path, ...] = (),
+    ):
         global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
         nonlocal login_running, login_process
         if not exe_path:
@@ -2032,9 +2037,11 @@ def build_gui():
 
         settings = load_settings(COLLECTOR_SETTINGS)
         configured_path = settings.get("login_browser_path")
-        browser = find_login_browser(
-            configured_path if isinstance(configured_path, str) else None
-        )
+        browser = browser_override
+        if browser is None:
+            browser = find_login_browser(
+                configured_path if isinstance(configured_path, str) else None
+            )
         if browser is None:
             messagebox.showinfo(
                 "选择登录浏览器",
@@ -2063,11 +2070,35 @@ def build_gui():
                     "所选程序不存在、无法访问，或不是受支持的 Chromium 浏览器。",
                 )
                 return
-        settings["login_browser_path"] = str(browser.executable)
-        try:
-            save_settings(settings, COLLECTOR_SETTINGS)
-        except OSError as exc:
-            log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
+
+        can_fallback = not attempted_browser_paths
+        attempted_with_current = (*attempted_browser_paths, browser.executable)
+
+        def retry_with_fallback(detail: str) -> bool:
+            if not can_fallback:
+                return False
+            fallback = find_login_browser(
+                excluded_paths=attempted_with_current,
+            )
+            if fallback is None:
+                return False
+            log(
+                f"{browser.display_name} 登录未能完成：{detail}；"
+                f"将仅重试一次 {fallback.display_name}。"
+            )
+            do_login(
+                resume_download,
+                browser_override=fallback,
+                attempted_browser_paths=attempted_with_current,
+            )
+            return True
+
+        def remember_working_browser() -> None:
+            settings["login_browser_path"] = str(browser.executable)
+            try:
+                save_settings(settings, COLLECTOR_SETTINGS)
+            except OSError as exc:
+                log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
 
         log(f"正在使用 {browser.display_name} 打开钉钉登录…")
         try:
@@ -2079,6 +2110,9 @@ def build_gui():
                 cookies_file=COOKIES_FILE,
             )
         except Exception as exc:
+            login_process = None
+            if retry_with_fallback(str(exc) or "浏览器无法启动"):
+                return
             messagebox.showerror("登录失败", str(exc))
             return
 
@@ -2098,6 +2132,8 @@ def build_gui():
             if not state.running:
                 start_btn.configure(state="normal")
             status = validate_dingtalk_session(COOKIES_FILE)
+            if return_code == 0 and status.valid:
+                remember_working_browser()
             if return_code == 0 and status.valid and probe_result[0] == "accepted":
                 log("登录授权完成，会话已保存；后续下载会复用该会话。")
                 if resume_download:
@@ -2116,6 +2152,8 @@ def build_gui():
                 detail = f"登录引擎退出码 {return_code}"
             else:
                 detail = probe_result[1]
+            if return_code != 0 and retry_with_fallback(detail):
+                return
             log(f"登录未完成：{detail}")
             if probe_result[0] == "unavailable":
                 messagebox.showerror(
@@ -2125,7 +2163,7 @@ def build_gui():
             else:
                 messagebox.showerror(
                     "登录未完成",
-                    f"{detail}。\n\n请只保留软件唤起的授权窗口，完成登录后等待窗口自动结束。",
+                    f"{detail}。\n\n请在软件唤起的授权窗口内完成登录；其他已打开的浏览器无需关闭。",
                 )
 
         def wait_for_login() -> None:
