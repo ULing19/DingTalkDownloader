@@ -416,7 +416,7 @@ class GuiDownloaderTests(unittest.TestCase):
 
             self.assertEqual(destination.name, "资料.pdf.mp4")
 
-    def test_worker_routes_live_and_media_tasks_to_mediago_first(self):
+    def test_worker_routes_live_to_godingtalk_first_and_media_tasks_to_mediago(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             godingtalk = root_path / "GoDingtalk.exe"
@@ -451,12 +451,11 @@ class GuiDownloaderTests(unittest.TestCase):
             ) as run_media:
                 self.assertTrue(worker._run_one(0, live)[0])
                 self.assertTrue(worker._run_one(1, shanji)[0])
-            self.assertEqual(run_media.call_count, 2)
-            run_media.assert_any_call(0, live)
+            self.assertEqual(run_media.call_count, 1)
             run_media.assert_any_call(1, shanji)
-            run_live.assert_not_called()
+            run_live.assert_called_once_with(0, live)
 
-    def test_live_falls_back_to_godingtalk_only_after_mediago_failure(self):
+    def test_live_falls_back_to_mediago_only_after_godingtalk_failure(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             godingtalk = root_path / "GoDingtalk.exe"
@@ -480,18 +479,17 @@ class GuiDownloaderTests(unittest.TestCase):
                 0,
             )
             with mock.patch.object(
-                worker, "_run_mediago", return_value=(False, "", "解析失败")
-            ) as run_media, mock.patch.object(
-                worker, "_run_godingtalk", return_value=(True, "兼容结果", "")
-            ) as run_live:
+                worker, "_run_godingtalk", return_value=(False, "", "完整源失败")
+            ) as run_live, mock.patch.object(
+                worker, "_run_mediago", return_value=(True, "兼容结果", "")
+            ) as run_media:
                 ok, title, message, needs_check = worker._run_one(0, live)
 
             self.assertTrue(ok)
             self.assertEqual(title, "兼容结果")
-            self.assertIn("兼容引擎", message)
             self.assertFalse(needs_check)
+            run_live.assert_called_once_with(0, live)
             run_media.assert_called_once_with(0, live)
-            run_live.assert_called_once_with(0, live.url)
 
     def test_worker_treats_fallback_info_as_normal_completion(self):
         with tempfile.TemporaryDirectory() as root:
@@ -519,9 +517,7 @@ class GuiDownloaderTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                worker, "_run_mediago", return_value=(False, "", "解析失败")
-            ), mock.patch.object(
-                worker, "_run_godingtalk", return_value=(True, "兼容结果", "")
+                worker, "_run_godingtalk", return_value=(True, "完整结果", "")
             ):
                 worker.run()
 
@@ -535,7 +531,7 @@ class GuiDownloaderTests(unittest.TestCase):
                 and event.get("status") in {"完成", "需检查"}
             ][-1]
             self.assertEqual(final_update["status"], "完成")
-            self.assertIn("兼容引擎", final_update["message"])
+            self.assertEqual(final_update["message"], "下载完成")
             self.assertEqual(
                 [event for event in events if event["kind"] == "finished"][-1]["warnings"],
                 0,

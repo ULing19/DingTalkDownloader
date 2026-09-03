@@ -3,7 +3,7 @@
 """
 钉钉媒体批量下载器 - 图形界面
 支持：群直播回放、钉钉闪记、钉盘/群文件，以及文本/二维码批量导入。
-群直播优先通过 MediaGo 保留原始 HLS 时间轴，GoDingtalk 作为兼容回退。
+群直播优先通过 GoDingtalk 获取完整回放源，MediaGo 作为兼容回退；闪记和钉盘/群文件继续使用 MediaGo。
 """
 
 from __future__ import annotations
@@ -671,7 +671,7 @@ class AppState:
 
 
 # ---------------------------------------------------------------------------
-# 下载工作线程：群回放优先 MediaGo 原始 HLS，GoDingtalk 作为兼容回退
+# 下载工作线程：群回放优先 GoDingtalk 完整源，MediaGo 作为兼容回退
 # ---------------------------------------------------------------------------
 
 class DownloadWorker(threading.Thread):
@@ -703,6 +703,12 @@ class DownloadWorker(threading.Thread):
         self.video_workers = max(1, min(8, int(video_workers or 1)))
         self.config_file = config_file
         self.login_browser_path = login_browser_path
+        # GoDingtalk 的群直播分片请求在并发过高时容易出现
+        # ``context deadline exceeded``，尤其是较长回放。把引擎并发和
+        # 视频任务并发分开：多个视频仍可并行，但单个回放使用保守并发。
+        self.live_thread_count = max(1, min(4, int(thread_count or 1)))
+        self.godingtalk_http_timeout = 300
+        self.godingtalk_max_attempts = 3
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
         self._active_processes: Set[Any] = set()
@@ -820,7 +826,23 @@ class DownloadWorker(threading.Thread):
             return ok, title, message, ok and bool(message)
 
         if task.kind == KIND_LIVE:
-            media_error = ""
+            godingtalk_error = ""
+            if self.godingtalk is not None and self.godingtalk.is_file():
+                # 群直播优先走 GoDingtalk：它能读取完整分片列表并保留钉钉
+                # 返回的标题，避免 MediaGo 只拿到短 HLS 播放列表。
+                ok, title, godingtalk_error = self._run_godingtalk(index, task)
+                if ok:
+                    warning = bool(godingtalk_error and godingtalk_error.startswith("已保存，但检测到"))
+                    return True, title, godingtalk_error, warning
+
+                self.emit(
+                    "task_update",
+                    index=index,
+                    status="解析中",
+                    progress=0.0,
+                    message="完整回放源不可用，正在尝试兼容引擎…",
+                )
+
             if (
                 self.mediago is not None
                 and self.mediago.is_file()
@@ -830,38 +852,11 @@ class DownloadWorker(threading.Thread):
                 ok, title, media_error = self._run_mediago(index, task)
                 if ok or self.stop_event.is_set():
                     return ok, title, media_error, ok and bool(media_error)
-                self.emit(
-                    "task_update",
-                    index=index,
-                    status="解析中",
-                    progress=0.0,
-                    message="原始 HLS 链路不可用，正在尝试兼容引擎…",
-                )
-            if self.godingtalk is not None and self.godingtalk.is_file():
-                godingtalk_task = (
-                    task if task.group_name or task.replay_title else task.url
-                )
-                ok, title, fallback_message = self._run_godingtalk(index, godingtalk_task)
-                if ok:
-                    fallback_warning = bool(
-                        fallback_message and fallback_message.startswith("已保存，但检测到")
-                    )
-                    return (
-                        True,
-                        title,
-                        fallback_message
-                        or ("原始 HLS 链路不可用，已由兼容引擎完成" if media_error else ""),
-                        fallback_warning,
-                    )
-                if media_error:
-                    return (
-                        False,
-                        title,
-                        f"原始 HLS：{media_error}；兼容引擎：{fallback_message}",
-                        False,
-                    )
-                return False, title, fallback_message, False
-            return False, "", media_error or "未找到可用的群回放下载引擎", False
+                if godingtalk_error:
+                    return False, title, f"完整引擎：{godingtalk_error}；兼容引擎：{media_error}", False
+                return False, title, media_error, False
+
+            return False, "", godingtalk_error or "未找到可用的群回放下载引擎", False
 
         return False, "", "该钉钉链接暂不支持", False
 
@@ -974,158 +969,193 @@ class DownloadWorker(threading.Thread):
             return False, "", "未找到 GoDingtalk 可执行文件"
         task = task_or_url if isinstance(task_or_url, TaskItem) else None
         url = task.url if task is not None else str(task_or_url)
-        try:
-            self.save_dir.mkdir(parents=True, exist_ok=True)
-            staging_dir = Path(
-                tempfile.mkdtemp(prefix=".dingtalk-task-", dir=str(self.save_dir))
-            )
-        except OSError:
-            return False, "", "无法创建临时保存目录"
-        cmd = [
-            str(self.godingtalk),
-            "-url",
-            url,
-            "-saveDir",
-            str(staging_dir),
-            "-thread",
-            str(self.thread_count),
-        ]
-        if self.config_file is not None:
-            cmd.extend(["-config", str(self.config_file)])
-        # Always pass the same stable session path. If the file disappears,
-        # GoDingtalk will write the replacement to this exact location.
-        cmd.extend(["-cookies", str(self.cookies)])
-        if self.login_browser_path is not None:
-            cmd.extend(["-chromePath", str(self.login_browser_path)])
-
         title = ""
         last_err = ""
-        cleanup_staging = True
-        try:
-            # Windows: 不弹黑窗
-            creationflags = 0
-            if sys.platform == "win32":
-                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        for attempt in range(1, self.godingtalk_max_attempts + 1):
+            try:
+                self.save_dir.mkdir(parents=True, exist_ok=True)
+                staging_dir = Path(
+                    tempfile.mkdtemp(prefix=".dingtalk-task-", dir=str(self.save_dir))
+                )
+            except OSError:
+                return False, title, "无法创建临时保存目录"
 
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(APP_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=creationflags,
-            )
-        except Exception as exc:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            return False, title, f"启动失败: {exc}"
+            cmd = [
+                str(self.godingtalk),
+                "-url",
+                url,
+                "-saveDir",
+                str(staging_dir),
+                "-thread",
+                str(self.live_thread_count),
+                "-httpTimeout",
+                str(self.godingtalk_http_timeout),
+            ]
+            if self.config_file is not None:
+                cmd.extend(["-config", str(self.config_file)])
+            # Always pass the same stable session path. If the file disappears,
+            # GoDingtalk will write the replacement to this exact location.
+            cmd.extend(["-cookies", str(self.cookies)])
+            if self.login_browser_path is not None:
+                cmd.extend(["-chromePath", str(self.login_browser_path)])
 
-        self._register_process(proc)
-        assert proc.stdout is not None
-        buffer = ""
-        try:
-            while True:
-                if self.stop_event.is_set():
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                    return False, title, "已取消"
+            proc = None
+            cleanup_staging = True
+            attempt_err = ""
+            progress_seen = False
+            progress_completed = 0
+            progress_total = 0
+            try:
+                # Windows: 不弹黑窗
+                creationflags = 0
+                if sys.platform == "win32":
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
-                chunk = proc.stdout.read(256)
-                if not chunk:
-                    if proc.poll() is not None:
-                        break
-                    continue
-
-                # 进度行用 \r 刷新
-                buffer += chunk
-                parts = re.split(r"[\r\n]+", buffer)
-                buffer = parts[-1]
-                lines = parts[:-1]
-
-                for raw_line in lines:
-                    line = ANSI_RE.sub("", raw_line).strip()
-                    if not line:
-                        continue
-
-                    m_title = TITLE_RE.search(line)
-                    if m_title:
-                        title = m_title.group(1).strip()
-                        self.emit("task_update", index=index, title=title)
-                        continue
-
-                    m_prog = PROGRESS_RE.search(line)
-                    if m_prog:
-                        pct = float(m_prog.group(1))
-                        completed = int(m_prog.group(2))
-                        total_seg = int(m_prog.group(3))
-                        self.emit(
-                            "task_update",
-                            index=index,
-                            status="下载中",
-                            progress=pct,
-                            completed_seg=completed,
-                            total_seg=total_seg,
-                            message=f"分片 {completed}/{total_seg}",
-                        )
-                        continue
-
-                    if "正在转换" in line or "转换ts" in line.lower():
-                        self.emit(
-                            "task_update",
-                            index=index,
-                            status="转换中",
-                            progress=100.0,
-                            message="TS → MP4 转换中…",
-                        )
-                        continue
-
-                    if "下载成功" in line or "转换完成" in line:
-                        continue
-
-                    if any(
-                        k in line
-                        for k in ("失败", "错误", "error", "Error", "登录", "cookie", "Cookie")
-                    ):
-                        # 过滤掉无害提示
-                        if "警告" in line and "配置" in line:
-                            continue
-                        last_err = line
-
-                    if line.startswith("[") and "处理 URL" in line:
-                        continue
-
-            code = proc.wait()
-            if code == 0:
-                try:
-                    moved = self._promote_godingtalk_outputs(staging_dir, task, title)
-                except OSError:
-                    cleanup_staging = False
-                    return (
-                        False,
-                        title,
-                        f"保存下载文件失败，未搬出的文件保留在：{staging_dir}",
-                    )
-                if not moved:
-                    return False, title, "下载引擎未生成输出文件"
-                warnings = [
-                    warning
-                    for output in moved
-                    if (warning := media_av_sync_warning(output, require_av=True))
-                ]
-                return True, title, warnings[0] if warnings else ""
-            return False, title, last_err or f"进程退出码 {code}"
-        finally:
-            self._unregister_process(proc)
-            if cleanup_staging:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(APP_DIR),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=creationflags,
+                )
+            except Exception as exc:
                 shutil.rmtree(staging_dir, ignore_errors=True)
+                if attempt == self.godingtalk_max_attempts:
+                    return False, title, f"启动失败: {exc}"
+                last_err = f"启动失败: {exc}"
+                continue
+
+            self._register_process(proc)
+            assert proc.stdout is not None
+            buffer = ""
+            try:
+                while True:
+                    if self.stop_event.is_set():
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return False, title, "已取消"
+
+                    chunk = proc.stdout.read(256)
+                    if not chunk:
+                        if proc.poll() is not None:
+                            break
+                        continue
+
+                    # 进度行用 \r 刷新
+                    buffer += chunk
+                    parts = re.split(r"[\r\n]+", buffer)
+                    buffer = parts[-1]
+                    lines = parts[:-1]
+
+                    for raw_line in lines:
+                        line = ANSI_RE.sub("", raw_line).strip()
+                        if not line:
+                            continue
+
+                        m_title = TITLE_RE.search(line)
+                        if m_title:
+                            title = m_title.group(1).strip()
+                            self.emit("task_update", index=index, title=title)
+                            continue
+
+                        m_prog = PROGRESS_RE.search(line)
+                        if m_prog:
+                            progress_seen = True
+                            pct = float(m_prog.group(1))
+                            progress_completed = int(m_prog.group(2))
+                            progress_total = int(m_prog.group(3))
+                            self.emit(
+                                "task_update",
+                                index=index,
+                                status="下载中",
+                                progress=pct,
+                                completed_seg=progress_completed,
+                                total_seg=progress_total,
+                                message=f"分片 {progress_completed}/{progress_total}",
+                            )
+                            continue
+
+                        if "正在转换" in line or "转换ts" in line.lower():
+                            self.emit(
+                                "task_update",
+                                index=index,
+                                status="转换中",
+                                progress=100.0,
+                                message="TS → MP4 转换中…",
+                            )
+                            continue
+
+                        if "下载成功" in line or "转换完成" in line:
+                            continue
+
+                        if any(
+                            k in line
+                            for k in ("失败", "错误", "error", "Error", "登录", "cookie", "Cookie")
+                        ):
+                            # 过滤掉无害提示
+                            if "警告" in line and "配置" in line:
+                                continue
+                            attempt_err = line
+
+                        if line.startswith("[") and "处理 URL" in line:
+                            continue
+
+                code = proc.wait()
+                incomplete = progress_seen and progress_total > 0 and progress_completed < progress_total
+                if code == 0 and not incomplete:
+                    try:
+                        moved = self._promote_godingtalk_outputs(staging_dir, task, title)
+                    except OSError:
+                        cleanup_staging = False
+                        return (
+                            False,
+                            title,
+                            f"保存下载文件失败，未搬出的文件保留在：{staging_dir}",
+                        )
+                    if not moved:
+                        attempt_err = "下载引擎未生成输出文件"
+                    else:
+                        warnings = [
+                            warning
+                            for output in moved
+                            if (warning := media_av_sync_warning(output, require_av=True))
+                        ]
+                        return True, title, warnings[0] if warnings else ""
+                elif incomplete:
+                    attempt_err = f"分片下载不完整（{progress_completed}/{progress_total}）"
+
+                last_err = attempt_err or f"进程退出码 {code}"
+                lower = last_err.lower()
+                non_retryable = any(
+                    marker in lower
+                    for marker in ("登录", "cookie", "权限", "unauthorized", "forbidden", "参数错误")
+                )
+                if attempt < self.godingtalk_max_attempts and not non_retryable:
+                    self.emit(
+                        "task_update",
+                        index=index,
+                        status="解析中",
+                        progress=0.0,
+                        message=f"第 {attempt} 次下载未完成，正在重试（最多 {self.godingtalk_max_attempts} 次）…",
+                    )
+                    continue
+                return False, title, last_err
+            finally:
+                self._unregister_process(proc)
+                if cleanup_staging:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+
+        return False, title, last_err or "下载失败"
 
 
 # ---------------------------------------------------------------------------
