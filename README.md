@@ -150,6 +150,85 @@
 - [下载中文图文使用教程（PDF）](docs/DingTalkDownloader_UserGuide_zh-CN.pdf)
 - [下载中文图文使用教程（DOCX）](docs/DingTalkDownloader_UserGuide_zh-CN.docx)
 
+## 图文操作步骤
+
+下面的步骤图取自仓库内的中文使用教程。截图中的群名、群消息、账号信息、链接后缀和文件名均已做遮挡处理，仅用于说明按钮位置和操作顺序。
+
+### 专题一：单个视频下载
+
+适合只下载一条群直播回放，或先用一个链接验证当前账号和网络环境。
+
+1. 在钉钉中进入目标群的“直播广场”，找到需要保存的回放。
+
+<p align="center"><img src="docs/images/tutorial-single-01-open-live.png" width="760" alt="打开目标群直播广场"></p>
+<p align="center"><sub>步骤 1：打开目标群的直播广场。</sub></p>
+
+2. 在回放卡片的分享菜单中复制链接；也可以保存二维码后在下载器中识别。
+
+<p align="center"><img src="docs/images/tutorial-single-02-copy-link.png" width="760" alt="复制回放链接或分享二维码"></p>
+<p align="center"><sub>步骤 2：复制回放链接，或使用分享二维码。</sub></p>
+
+3. 在下载器中选择可写的保存目录，将完整链接粘贴到左侧输入框，再点击“解析到任务列表”。
+
+<p align="center"><img src="docs/images/tutorial-single-03-save-folder.png" width="760" alt="选择视频保存目录"></p>
+<p align="center"><sub>步骤 3：选择保存目录，保存位置不限定为某个盘符。</sub></p>
+
+<p align="center"><img src="docs/images/tutorial-single-04-import-link.png" width="760" alt="导入单个回放链接"></p>
+<p align="center"><sub>步骤 4：导入链接或二维码，确认任务列表中只出现目标视频。</sub></p>
+
+4. 首次使用或会话过期时，点击软件内的登录入口。软件会优先唤起 Microsoft Edge，授权必须在软件打开的浏览器窗口中完成。
+
+<p align="center"><img src="docs/images/tutorial-single-05-login.png" width="760" alt="通过软件唤起浏览器完成登录授权"></p>
+<p align="center"><sub>步骤 5：在软件唤起的浏览器窗口中完成钉钉授权。</sub></p>
+
+5. 确认任务状态和保存目录后点击“开始下载”。完成后点击“打开保存目录”检查文件；同名结果会自动追加编号，不会覆盖旧文件。
+
+<p align="center"><img src="docs/images/tutorial-single-06-start-download.png" width="760" alt="开始下载单个视频"></p>
+<p align="center"><sub>步骤 6：确认任务后开始下载。</sub></p>
+
+<p align="center"><img src="docs/images/tutorial-single-07-result.png" width="760" alt="查看单个视频下载结果"></p>
+<p align="center"><sub>步骤 7：打开保存目录，确认 MP4 文件已经生成。</sub></p>
+
+### 专题二：批量获取并下载当前群回放
+
+适合一次获取当前已打开群直播广场中的多条回放。程序只读取已打开的页面，不会自动枚举账号中未打开的群，也不会发送消息或点击群聊。
+
+1. 在钉钉中打开目标群的直播广场，并将回放列表滚动到末页后保持页面打开。这样更容易让新版钉钉完成全部分页加载。
+
+<p align="center"><img src="docs/images/tutorial-batch-01-last-page.png" width="760" alt="将群直播列表滚动到末页"></p>
+<p align="center"><sub>步骤 1：保持目标群直播列表的末页打开。</sub></p>
+
+2. 回到下载器，点击“一键获取已打开群回放”。程序会自动读取当前登录态中仍打开的群直播页面，并按群名整理链接。
+
+<p align="center"><img src="docs/images/tutorial-batch-02-collect-links.png" width="760" alt="一键获取已打开群回放链接"></p>
+<p align="center"><sub>步骤 2：点击一键获取入口，等待采集完成。</sub></p>
+
+3. 检查采集数量、群名称、回放标题和保存目录，再点击“解析到任务列表”。不需要下载的项目可以取消勾选。
+
+<p align="center"><img src="docs/images/tutorial-batch-03-confirm-list.png" width="760" alt="确认批量回放任务列表"></p>
+<p align="center"><sub>步骤 3：确认群名、标题和任务数量。</sub></p>
+
+4. 在任务列表中选择需要的项目，设置“同时下载”数量后点击“开始下载”。网络或电脑负载较高时，建议先使用 1-2 个并发任务。
+
+<p align="center"><img src="docs/images/tutorial-batch-04-start-download.png" width="760" alt="开始批量下载回放"></p>
+<p align="center"><sub>步骤 4：设置并发数量后开始批量下载。</sub></p>
+
+5. 下载完成后打开保存目录，按钉钉群内标题检查文件名和 MP4 状态。相同标题的不同链接会保存为 `标题.mp4`、`标题 (1).mp4`、`标题 (2).mp4`。
+
+<p align="center"><img src="docs/images/tutorial-batch-05-result.png" width="760" alt="查看批量下载结果"></p>
+<p align="center"><sub>步骤 5：查看下载进度、完成状态和同名文件编号。</sub></p>
+
+### 三类链接如何选择
+
+| 你要处理的内容 | 入口或链接类型 | 推荐操作 |
+| --- | --- | --- |
+| 一条群直播回放 | `n.dingtalk.com/dingding/live-room/...` | 使用“单个视频下载”流程 |
+| 当前群多条回放 | 已打开的群“直播广场” | 使用“一键获取已打开群回放”流程 |
+| 闪记记录 | `shanji.dingtalk.com/app/transcribes/...` | 粘贴完整链接后解析 |
+| 群文件或钉盘视频 | `qr.dingtalk.com/page/yunpan?...` | 保留 `spaceId`、`fileId` 等原始参数后解析 |
+
+二维码只是链接载体，识别后仍需确认它对应的是视频、闪记还是普通文件；普通 PDF、Office、图片和压缩包只有在钉钉返回直接下载地址时才会保存。
+
 ### 方式一：安装版（推荐）
 
 从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.9_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
