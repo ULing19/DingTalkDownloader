@@ -33,8 +33,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from dingtalk_live_share import LiveShareError, LiveShareMedia, fetch_complete_playlist, is_live_share_url
+
 
 KIND_LIVE = "live"
+KIND_LIVE_SHARE = "live_share"
 KIND_SHANJI = "shanji"
 KIND_YUNPAN = "yunpan"
 KIND_UNKNOWN = "unknown"
@@ -43,7 +46,7 @@ _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.3.9 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.3.10 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -310,6 +313,11 @@ def classify_dingtalk_url(url: str) -> UrlInfo:
     if _is_yunpan(parsed, query):
         return UrlInfo(KIND_YUNPAN, _YUNPAN_LABEL, _normalize_yunpan(parsed, query))
 
+    if is_live_share_url(raw):
+        # Room-only shares need official password verification before resolving
+        # a replay UUID. Do not send them directly to either legacy engine.
+        return UrlInfo(KIND_LIVE_SHARE, "直播分享", _safe_url_without_fragment(raw))
+
     room_id = _query_first(query, "roomId")
     live_uuid = _query_first(query, "liveUuid")
     if _host_is_dingtalk(parsed.hostname or "") and room_id and live_uuid:
@@ -551,6 +559,8 @@ def _parse_private_info(info: Mapping[str, Any], kind: str) -> _ResolvedPrivate:
 
 
 def _classify_process_text(text: str) -> str:
+    if "19116" in text or "19117" in text:
+        return "该回放需要验证观看密码"
     lower = text.lower()
     # CSpace 将对象状态/权限放在业务错误码或中文消息中；先保留这类
     # 可操作提示，避免统一折叠成“媒体解析失败”。
@@ -1241,6 +1251,63 @@ def _download_direct(
             _remove_file(part)
 
 
+def download_authorized_live(
+    media: LiveShareMedia,
+    ffmpeg: os.PathLike[str] | str,
+    save_dir: os.PathLike[str] | str,
+    stop_event: Optional[threading.Event] = None,
+    progress_cb: Optional[ProgressCallback] = None,
+) -> Tuple[str, Path]:
+    """Download only the playback URL returned after official verification.
+
+    No viewing password or account cookies are passed to FFmpeg. The verified
+    playlist is temporary. Authorization errors never select an unverified source.
+    """
+    if _stop_requested(stop_event):
+        raise MediaDownloadError("已取消")
+    ffmpeg_path = Path(ffmpeg)
+    if not ffmpeg_path.is_file():
+        raise MediaDownloadError("未找到 FFmpeg 转换工具")
+    output_dir = Path(save_dir)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise MediaDownloadError("无法创建保存目录") from None
+    fmt = _format_from_url(media.playback_url)
+    candidate = _MediaCandidate(media.playback_url, fmt, "", {}, fmt == "m3u8", 0)
+    playlist, expected_duration = "", 0.0
+    if fmt not in {"mp4", "m4v", "mov"}:
+        try:
+            playlist, expected_duration = fetch_complete_playlist(media.playback_url, stop_event=stop_event)
+        except LiveShareError as exc:
+            raise MediaDownloadError(str(exc)) from None
+    private = _ResolvedPrivate(media.title, candidate, 1, playlist, KIND_LIVE)
+    # FFmpeg also handles endpoints without a filename extension; keeping the
+    # original timestamps uses the same A/V policy as ordinary replay downloads.
+    # Validate in an isolated staging directory before promoting a final file.
+    with tempfile.TemporaryDirectory(prefix=".share-download-", dir=output_dir) as staging:
+        def staged_progress(status, progress, message):
+            if status == "完成":
+                _emit(progress_cb, "转换中", 98.0, "正在检查完整性")
+            else:
+                _emit(progress_cb, status, progress, message)
+        output = _download_playlist(private, ffmpeg_path, Path(staging), stop_event, staged_progress, {})
+        if expected_duration:
+            timeline = inspect_mp4_av_timeline(output)
+            if timeline is None or max(timeline.video_end, timeline.audio_end) < expected_duration - 2.0:
+                raise MediaDownloadError("分享视频时长短于完整播放列表，未保存不完整结果，请重试")
+        destination, reservation = _reserve_output(output_dir, media.title, ".mp4")
+        try:
+            os.replace(output, reservation)
+            os.replace(reservation, destination)
+        except OSError:
+            _remove_file(reservation)
+            raise MediaDownloadError("分享视频保存失败") from None
+        output = destination
+    _emit(progress_cb, "完成", 100.0, "下载完成")
+    return media.title, output
+
+
 def download_resolved(
     url: str,
     kind: Any,
@@ -1289,6 +1356,7 @@ def download_resolved(
 __all__ = [
     "AVTimeline",
     "KIND_LIVE",
+    "KIND_LIVE_SHARE",
     "KIND_SHANJI",
     "KIND_UNKNOWN",
     "KIND_YUNPAN",
@@ -1297,6 +1365,7 @@ __all__ = [
     "UrlInfo",
     "classify_dingtalk_url",
     "download_resolved",
+    "download_authorized_live",
     "find_mediago",
     "inspect_mp4_av_timeline",
     "media_av_sync_warning",

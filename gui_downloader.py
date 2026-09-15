@@ -31,16 +31,22 @@ from browser_support import (
 )
 from dingtalk_media import (
     KIND_LIVE,
+    KIND_LIVE_SHARE,
     KIND_SHANJI,
     KIND_UNKNOWN,
     KIND_YUNPAN,
     MediaDownloadError,
     classify_dingtalk_url,
     download_resolved,
+    download_authorized_live,
     find_mediago,
     media_av_sync_warning,
     safe_output_stem,
 )
+from dingtalk_live_share import (
+    LiveShareCancelled, LiveShareError, resolve_live_share, validate_viewing_password,
+)
+from qr_support import qr_recovery_variants
 from dingtalk_rpc import (
     DingTalkAuthenticationError,
     DingTalkRpcError,
@@ -200,7 +206,7 @@ def _resource_path(relative: str) -> Path:
 ICON_FILE = _resource_path("assets/download.ico")
 
 DINGTALK_URL_RE = re.compile(
-    r"https?://[^\s\"'<>\[\]()]*dingtalk\.com[^\s\"'<>\[\]()]*",
+    r"https?://[^\s\"'<>\[\]()，。；！）】]*dingtalk\.com[^\s\"'<>\[\]()，。；！）】]*",
     re.IGNORECASE,
 )
 PROGRESS_RE = re.compile(
@@ -212,6 +218,7 @@ HANDLE_RE = re.compile(r"\[(\d+)\]\s*处理\s*URL:\s*(.+)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 TASK_KIND_LABELS = {
     KIND_LIVE: "群回放",
+    KIND_LIVE_SHARE: "直播分享",
     KIND_SHANJI: "闪记",
     KIND_YUNPAN: "群文件",
     KIND_UNKNOWN: "未知",
@@ -260,7 +267,7 @@ def extract_urls_from_text(text: str) -> List[str]:
         if not line or line.startswith("#"):
             continue
         for m in DINGTALK_URL_RE.finditer(line):
-            u = m.group(0).rstrip(".,;\"'")
+            u = m.group(0).rstrip(".,;\"'，。；！!：:）】")
             if u not in seen:
                 seen.add(u)
                 found.append(u)
@@ -369,6 +376,14 @@ def decode_qr_images(paths: List[Path]) -> List[str]:
                 if candidates:
                     break
 
+            if not candidates:
+                for variant in qr_recovery_variants(img, detector):
+                    candidates.extend(_try_decode_pyzbar(variant))
+                    if not candidates:
+                        candidates.extend(_try_decode_qr(detector, variant))
+                    if candidates:
+                        break
+
             for raw in candidates:
                 raw = (raw or "").strip()
                 if not raw:
@@ -382,12 +397,14 @@ def decode_qr_images(paths: List[Path]) -> List[str]:
                 elif raw.startswith("http") and raw not in seen:
                     seen.add(raw)
                     urls.append(raw)
-        except Exception as exc:
-            print(f"QR decode failed for {path}: {exc}", file=sys.stderr)
+        except Exception:
+            print("二维码图片无法读取或识别", file=sys.stderr)
     return urls
 
 
 def url_short_label(url: str) -> str:
+    if classify_dingtalk_url(url).kind == KIND_LIVE_SHARE:
+        return "直播分享（开始下载时验证）"
     try:
         qs = parse_qs(urlparse(url).query)
         live = (qs.get("liveUuid") or [""])[0]
@@ -713,6 +730,7 @@ class DownloadWorker(threading.Thread):
         self._current_process: Optional[subprocess.Popen] = None
         self._active_processes: Set[Any] = set()
         self._output_lock = threading.Lock()
+        self._password_lock = threading.Lock()
 
     def emit(self, kind: str, **payload):
         self.event_q.put({"kind": kind, **payload})
@@ -771,6 +789,9 @@ class DownloadWorker(threading.Thread):
                 task = self.tasks[index]
                 try:
                     ok, title, message, needs_check = future.result()
+                except LiveShareCancelled:
+                    self.emit("task_update", index=index, status="已取消", message="已取消观看密码输入")
+                    continue
                 except Exception:
                     ok, title, message, needs_check = (
                         False,
@@ -821,6 +842,10 @@ class DownloadWorker(threading.Thread):
         if task.kind == KIND_UNKNOWN:
             return False, "", "无法识别链接类型，请确认链接完整", False
 
+        if task.kind == KIND_LIVE_SHARE:
+            ok, title, message = self._run_live_share(index, task)
+            return ok, title, message, ok and bool(message)
+
         if task.kind in {KIND_SHANJI, KIND_YUNPAN}:
             ok, title, message = self._run_mediago(index, task)
             return ok, title, message, ok and bool(message)
@@ -834,6 +859,10 @@ class DownloadWorker(threading.Thread):
                 if ok:
                     warning = bool(godingtalk_error and godingtalk_error.startswith("已保存，但检测到"))
                     return True, title, godingtalk_error, warning
+
+                if any(marker in godingtalk_error for marker in ("19116", "19117", "观看密码")):
+                    ok, title, message = self._run_live_share(index, task)
+                    return ok, title, message, ok and bool(message)
 
                 self.emit(
                     "task_update",
@@ -850,6 +879,9 @@ class DownloadWorker(threading.Thread):
                 and self.ffmpeg.is_file()
             ):
                 ok, title, media_error = self._run_mediago(index, task)
+                if not ok and "观看密码" in media_error:
+                    ok, title, message = self._run_live_share(index, task)
+                    return ok, title, message, ok and bool(message)
                 if ok or self.stop_event.is_set():
                     return ok, title, media_error, ok and bool(media_error)
                 if godingtalk_error:
@@ -859,6 +891,55 @@ class DownloadWorker(threading.Thread):
             return False, "", godingtalk_error or "未找到可用的群回放下载引擎", False
 
         return False, "", "该钉钉链接暂不支持", False
+
+    def _request_viewing_password(self, index: int, message: str) -> Optional[str]:
+        # Serialize dialogs for concurrent downloads. Stopping also releases
+        # workers that are waiting for the dialog lock or for user input.
+        while not self.stop_event.is_set():
+            if self._password_lock.acquire(timeout=0.1):
+                break
+        else:
+            raise LiveShareCancelled("已取消")
+        replies: queue.Queue = queue.Queue(maxsize=1)
+        try:
+            if self.stop_event.is_set():
+                raise LiveShareCancelled("已取消")
+            self.emit("password_request", index=index, message=message, replies=replies)
+            while not self.stop_event.is_set():
+                try:
+                    return replies.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+            raise LiveShareCancelled("已取消")
+        finally:
+            self._password_lock.release()
+
+    def _run_live_share(self, index: int, task: TaskItem):
+        from dingtalk_media import _load_flat_cookies
+
+        try:
+            cookies = _load_flat_cookies(self.cookies) if self.cookies.exists() else {}
+            media = resolve_live_share(
+                task.url, cookies,
+                password_prompt=lambda message: self._request_viewing_password(index, message),
+                stop_event=self.stop_event,
+            )
+            self.emit("task_update", index=index, title=media.title, message="分享验证成功，正在下载回放…")
+            title, output = download_authorized_live(
+                media, self.ffmpeg or Path("__missing_ffmpeg__"), self.save_dir,
+                self.stop_event,
+                lambda status, progress, message: self.emit(
+                    "task_update", index=index, status=status, progress=progress, message=message,
+                ),
+            )
+            output = self._apply_group_name(output, task, title)
+            return True, title, media_av_sync_warning(output, require_av=True)
+        except LiveShareCancelled:
+            raise
+        except (LiveShareError, MediaDownloadError) as exc:
+            return False, "", str(exc)
+        except Exception:
+            return False, "", "分享回放下载失败，请检查网络后重试"
 
     def _run_mediago(self, index: int, task: TaskItem):
         if self.mediago is None or not self.mediago.is_file():
@@ -1138,7 +1219,7 @@ class DownloadWorker(threading.Thread):
                 lower = last_err.lower()
                 non_retryable = any(
                     marker in lower
-                    for marker in ("登录", "cookie", "权限", "unauthorized", "forbidden", "参数错误")
+                    for marker in ("登录", "cookie", "权限", "unauthorized", "forbidden", "参数错误", "19116", "19117", "观看密码")
                 )
                 if attempt < self.godingtalk_max_attempts and not non_retryable:
                     self.emit(
@@ -1211,6 +1292,7 @@ def build_gui():
     login_running = False
     session_check_running = False
     update_running = False
+    qr_running = False
     login_process: Optional[Any] = None
     closing = False
     url_group_names: Dict[str, str] = {}
@@ -1292,7 +1374,7 @@ def build_gui():
 
     hint = ctk.CTkLabel(
         left,
-        text="每行一个群回放、闪记或群文件链接；也可粘贴含链接的文本。",
+        text="支持群回放、直播分享短链、闪记和群文件；观看密码在下载时按需输入。",
         text_color="gray70",
         font=ctk.CTkFont(size=12),
         wraplength=360,
@@ -1342,6 +1424,10 @@ def build_gui():
             messagebox.showinfo("导入", "未发现新的钉钉链接（可能已全部存在）")
 
     def import_qr():
+        nonlocal qr_running
+        if qr_running or state.running or collector_running or login_running or session_check_running or update_running:
+            messagebox.showinfo("操作进行中", "请等待当前操作完成后再导入二维码。")
+            return
         paths = filedialog.askopenfilenames(
             title="选择二维码图片",
             filetypes=[
@@ -1351,19 +1437,29 @@ def build_gui():
         )
         if not paths:
             return
-        try:
-            urls = decode_qr_images([Path(p) for p in paths])
-        except Exception as exc:
-            messagebox.showerror("二维码识别失败", str(exc))
-            return
-        n = add_urls(urls, f"二维码（{len(paths)} 张图）")
-        if n == 0:
-            messagebox.showinfo(
-                "二维码",
-                "未识别到新链接。请确认图片清晰，且二维码指向支持的钉钉页面。",
-            )
-        else:
-            messagebox.showinfo("二维码", f"成功识别并添加 {n} 条链接")
+        qr_running = True
+        qr_button.configure(state="disabled", text="识别中…")
+        refresh_action_states()
+
+        def finish_qr(urls):
+            nonlocal qr_running
+            qr_running = False
+            qr_button.configure(state="normal", text="导入二维码")
+            refresh_action_states()
+            n = add_urls(urls, f"二维码（{len(paths)} 张图）")
+            if n == 0:
+                messagebox.showinfo("二维码", "未识别到新链接。请确认图片清晰，且二维码指向支持的钉钉页面。")
+            else:
+                messagebox.showinfo("二维码", f"成功识别并添加 {n} 条链接；有观看密码的分享会在下载时提示输入。")
+
+        def qr_worker():
+            try:
+                urls = decode_qr_images([Path(p) for p in paths])
+            except Exception:
+                urls = []
+            schedule_ui(lambda: finish_qr(urls))
+
+        threading.Thread(target=qr_worker, name="dingtalk-qr-import", daemon=True).start()
 
     def clear_input():
         textbox.delete("1.0", "end")
@@ -1371,9 +1467,8 @@ def build_gui():
     ctk.CTkButton(btn_row, text="导入文本", command=import_txt, width=100).pack(
         side="left", padx=(0, 6)
     )
-    ctk.CTkButton(btn_row, text="导入二维码", command=import_qr, width=100).pack(
-        side="left", padx=6
-    )
+    qr_button = ctk.CTkButton(btn_row, text="导入二维码", command=import_qr, width=100)
+    qr_button.pack(side="left", padx=6)
     ctk.CTkButton(
         btn_row,
         text="清空",
@@ -1640,7 +1735,7 @@ def build_gui():
             or session_check_running
             or update_running
         )
-        normal_or_disabled = "disabled" if busy else "normal"
+        normal_or_disabled = "disabled" if busy or qr_running else "normal"
         start_btn.configure(state=normal_or_disabled)
         parse_btn.configure(state=normal_or_disabled)
         login_btn.configure(state=normal_or_disabled)
@@ -2225,6 +2320,9 @@ def build_gui():
         nonlocal worker, session_check_running
         if state.running:
             return
+        if qr_running:
+            log("二维码正在识别，请稍候。")
+            return
         if login_running:
             messagebox.showinfo("正在登录", "请先在软件唤起的浏览器中完成授权。")
             return
@@ -2288,7 +2386,7 @@ def build_gui():
             messagebox.showerror(
                 "不支持的链接",
                 f"有 {unknown_count} 条链接无法识别。\n"
-                "目前支持群回放、钉钉闪记和钉盘/群文件链接。",
+                "目前支持群回放、直播分享短链、钉钉闪记和钉盘/群文件链接。",
             )
             return
 
@@ -2300,6 +2398,8 @@ def build_gui():
         mediago_ready = bool(mediago_path and mediago_path.is_file())
         ffmpeg_ready = bool(ffmpeg_path and ffmpeg_path.is_file())
         missing = []
+        if any(task.kind == KIND_LIVE_SHARE for task in selected_tasks) and not ffmpeg_ready:
+            missing.append("FFmpeg（直播分享下载）")
         if has_media_tasks:
             if not mediago_ready:
                 missing.append("MediaGo（闪记/群文件解析）")
@@ -2315,7 +2415,8 @@ def build_gui():
             return
 
         session_status = validate_dingtalk_session(COOKIES_FILE)
-        if not session_status.valid:
+        public_shares_only = all(task.kind == KIND_LIVE_SHARE for task in selected_tasks)
+        if not session_status.valid and not public_shares_only:
             if not godingtalk_ready:
                 messagebox.showerror(
                     "需要登录",
@@ -2331,7 +2432,7 @@ def build_gui():
             do_login(resume_download=True)
             return
 
-        if not session_checked:
+        if not session_checked and not public_shares_only:
             if session_check_running:
                 log("正在校验钉钉登录会话，请稍候…")
                 return
@@ -2443,12 +2544,70 @@ def build_gui():
         log("正在停止当前任务并取消后续任务…")
         stop_btn.configure(state="disabled")
 
+    def show_viewing_password(ev):
+        replies = ev["replies"]
+        if closing or stop_event.is_set():
+            replies.put_nowait(None)
+            return
+        index = ev["index"]
+        dialog = ctk.CTkToplevel(app)
+        dialog.title("输入观看密码")
+        dialog.geometry("440x240")
+        dialog.resizable(False, False)
+        dialog.transient(app)
+        finished = False
+        ctk.CTkLabel(dialog, text=f"任务 {index + 1} · 直播分享", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(18, 6))
+        ctk.CTkLabel(dialog, text=ev["message"], wraplength=400).pack(padx=16)
+        entry = ctk.CTkEntry(dialog, show="•", width=260)
+        entry.pack(pady=10)
+        tip = ctk.CTkLabel(dialog, text="请输入分享者提供的 6 位密码，仅用于本次验证。", wraplength=405)
+        tip.pack()
+
+        def finish(value=None):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            entry.delete(0, "end")
+            if not stop_event.is_set():
+                replies.put_nowait(value)
+            dialog.destroy()
+
+        def submit(_event=None):
+            try:
+                value = validate_viewing_password(entry.get())
+            except LiveShareError as exc:
+                tip.configure(text=str(exc), text_color="#f07178")
+                return
+            finish(value)
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(pady=12)
+        ctk.CTkButton(buttons, text="验证并继续", command=submit, width=130).pack(side="left", padx=8)
+        ctk.CTkButton(buttons, text="取消此任务", command=finish, width=130, fg_color="#555").pack(side="left", padx=8)
+        entry.bind("<Return>", submit)
+        dialog.protocol("WM_DELETE_WINDOW", finish)
+
+        def watch_stop():
+            if finished:
+                return
+            if closing or stop_event.is_set():
+                finish()
+                return
+            dialog.after(100, watch_stop)
+
+        # Non-modal: the main Stop button remains available during a prompt.
+        dialog.after(150, entry.focus_set)
+        watch_stop()
+
     def poll_events():
         try:
             while True:
                 ev = event_q.get_nowait()
                 kind = ev.get("kind")
-                if kind == "task_update":
+                if kind == "password_request":
+                    show_viewing_password(ev)
+                elif kind == "task_update":
                     i = ev["index"]
                     if 0 <= i < len(state.tasks):
                         t = state.tasks[i]

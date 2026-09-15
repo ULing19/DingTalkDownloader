@@ -37,3 +37,8 @@ foreach ($name in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'ZBAR-LICENSE.txt', 'PY
         Copy-Item -LiteralPath $source -Destination (Join-Path $DestinationDir $name) -Force
     }
 }
+
+$sharingGuide = Join-Path $SourceDir 'docs\password-sharing.md'
+if (Test-Path -LiteralPath $sharingGuide -PathType Leaf) {
+    Copy-Item -LiteralPath $sharingGuide -Destination (Join-Path $DestinationDir 'PASSWORD_SHARE_BETA.md') -Force
+}

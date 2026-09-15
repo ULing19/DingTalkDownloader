@@ -1,14 +1,18 @@
 ; 钉钉回放批量下载器 - Inno Setup 安装脚本
 ; 编译：ISCC.exe setup.iss
-; 源文件目录：dist\DingTalkDownloader_1.3.9（由 build_exe.bat 生成）
+; 源文件目录：dist\DingTalkDownloader_<版本>（由 build_exe.bat 生成）
 
 #define MyAppName "钉钉回放下载器"
 #define MyAppNameEn "DingTalkDownloader"
-#define MyAppVersion "1.3.9"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.3.10"
+#endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"
 #define MyAppEngine "GoDingtalk_v2.5.2_windows_amd64.exe"
-#define ReleaseDir "..\dist\DingTalkDownloader_1.3.9"
+#ifndef ReleaseDir
+  #define ReleaseDir "..\dist\DingTalkDownloader_" + MyAppVersion
+#endif
 
 [Setup]
 AppId={{A8F3C2E1-7B4D-4E9A-9C1F-2D6B8A0E5F31}
@@ -26,7 +30,7 @@ AllowNoIcons=yes
 ; 安装包与绿色版压缩包归集到同一个版本目录
 OutputDir={#ReleaseDir}
 ; 使用 ASCII 文件名，便于不同 Git 客户端和浏览器稳定下载
-OutputBaseFilename=DingTalkDownloader_1.3.9_Setup
+OutputBaseFilename=DingTalkDownloader_{#MyAppVersion}_Setup
 SetupIconFile=..\assets\download.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -71,6 +75,7 @@ Source: "{#ReleaseDir}\mediago.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\回放链接一键获取说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\PASSWORD_SHARE_BETA.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#ReleaseDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\ZBAR-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

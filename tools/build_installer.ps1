@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.9'
+    [string]$Version = '1.3.10'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,7 +71,7 @@ if (-not $iscc) {
 
 $installerScript = Join-Path $root 'installer\setup.iss'
 Write-Host "Compiling installer with: $iscc"
-& $iscc $installerScript
+& $iscc "/DMyAppVersion=$Version" $installerScript
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed with exit code $LASTEXITCODE"
 }
