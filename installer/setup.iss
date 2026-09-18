@@ -5,7 +5,7 @@
 #define MyAppName "钉钉回放下载器"
 #define MyAppNameEn "DingTalkDownloader"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.11"
+  #define MyAppVersion "1.3.12"
 #endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"

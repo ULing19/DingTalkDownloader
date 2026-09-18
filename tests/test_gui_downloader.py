@@ -1053,5 +1053,53 @@ class GuiDownloaderTests(unittest.TestCase):
             decode.assert_called()
 
 
+    def test_multiple_qr_tasks_retry_and_keep_each_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            mediago = root_path / "mediago.exe"
+            ffmpeg = root_path / "ffmpeg.exe"
+            mediago.write_bytes(b"placeholder")
+            ffmpeg.write_bytes(b"placeholder")
+            worker = gui.DownloadWorker(
+                godingtalk=None,
+                mediago=mediago,
+                ffmpeg=ffmpeg,
+                tasks=[],
+                save_dir=root_path / "out",
+                cookies=root_path / "cookies.json",
+                thread_count=4,
+                event_q=queue.Queue(),
+                stop_event=threading.Event(),
+            )
+            tasks = [
+                gui.make_task_item(
+                    f"https://qr.dingtalk.com/page/yunpan?route=previewDentry&spaceId=1&fileId={file_id}&type=file",
+                    index,
+                )
+                for index, file_id in enumerate((101, 202), 1)
+            ]
+            outputs = []
+            calls = []
+            def fake_download(**kwargs):
+                calls.append(kwargs["url"])
+                if len(calls) == 1:
+                    raise gui.MediaDownloadError("网络连接失败")
+                path = root_path / "out" / f"file-{len(calls)}.bin"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"ok")
+                outputs.append(path)
+                return f"文件{len(calls)}", path
+            with mock.patch.object(gui, "download_resolved", side_effect=fake_download), mock.patch.object(
+                gui, "media_av_sync_warning", return_value=""
+            ), mock.patch.object(gui.time, "sleep"):
+                results = [worker._run_mediago(index, task) for index, task in enumerate(tasks)]
+            self.assertEqual([result[0] for result in results], [True, True])
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[0], tasks[0].url)
+            self.assertEqual(calls[1], tasks[0].url)
+            self.assertEqual(calls[2], tasks[1].url)
+            self.assertEqual(len(outputs), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

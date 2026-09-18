@@ -45,7 +45,7 @@ from urllib.parse import urlparse
 
 PROJECT_OWNER = "ULing19"
 PROJECT_REPO = "DingTalkDownloader"
-CURRENT_VERSION = "1.3.11"
+CURRENT_VERSION = "1.3.12"
 RELEASES_API_URL = (
     f"https://api.github.com/repos/{PROJECT_OWNER}/{PROJECT_REPO}/releases/latest"
 )

@@ -17,6 +17,7 @@ import shutil
 import threading
 import subprocess
 import tempfile
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -731,6 +732,10 @@ class DownloadWorker(threading.Thread):
         self._active_processes: Set[Any] = set()
         self._output_lock = threading.Lock()
         self._password_lock = threading.Lock()
+        # MediaGo keeps a small amount of process-level state while resolving
+        # CSpace/QR links. Running several qr.dingtalk.com jobs through the
+        # parser at once can make earlier jobs fail while the last succeeds.
+        self._yunpan_media_lock = threading.Lock()
 
     def emit(self, kind: str, **payload):
         self.event_q.put({"kind": kind, **payload})
@@ -961,26 +966,68 @@ class DownloadWorker(threading.Thread):
                 message=message,
             )
 
-        try:
-            title, output = download_resolved(
-                url=task.url,
-                kind=task.kind,
-                mediago=self.mediago,
-                ffmpeg=self.ffmpeg,
-                cookies_json=self.cookies if self.cookies.exists() else None,
-                save_dir=self.save_dir,
-                stop_event=self.stop_event,
-                progress_cb=progress_callback,
-            )
-            output = self._apply_group_name(output, task, title)
-            return True, title, media_av_sync_warning(
-                output,
-                require_av=task.kind == KIND_LIVE,
-            )
-        except MediaDownloadError as exc:
-            return False, "", str(exc)
-        except Exception:
-            return False, "", "媒体下载失败，请稍后重试"
+        # QR/钉盘 links are short-lived previews. Serialize only this parser
+        # and retry transient parser/network failures so multiple QR tasks do
+        # not collapse into the last successful task.
+        attempts = 3 if task.kind == KIND_YUNPAN else 1
+        retry_markers = (
+            "网络连接失败",
+            "媒体解析超时",
+            "文件下载请求失败",
+            "解析结果中没有可下载媒体",
+            "没有可下载媒体",
+        )
+        for attempt in range(1, attempts + 1):
+            try:
+                if task.kind == KIND_YUNPAN:
+                    with self._yunpan_media_lock:
+                        title, output = download_resolved(
+                            url=task.url,
+                            kind=task.kind,
+                            mediago=self.mediago,
+                            ffmpeg=self.ffmpeg,
+                            cookies_json=self.cookies if self.cookies.exists() else None,
+                            save_dir=self.save_dir,
+                            stop_event=self.stop_event,
+                            progress_cb=progress_callback,
+                        )
+                else:
+                    title, output = download_resolved(
+                        url=task.url,
+                        kind=task.kind,
+                        mediago=self.mediago,
+                        ffmpeg=self.ffmpeg,
+                        cookies_json=self.cookies if self.cookies.exists() else None,
+                        save_dir=self.save_dir,
+                        stop_event=self.stop_event,
+                        progress_cb=progress_callback,
+                    )
+                output = self._apply_group_name(output, task, title)
+                return True, title, media_av_sync_warning(
+                    output,
+                    require_av=task.kind == KIND_LIVE,
+                )
+            except MediaDownloadError as exc:
+                message = str(exc)
+                if (
+                    task.kind != KIND_YUNPAN
+                    or attempt >= attempts
+                    or not any(marker in message for marker in retry_markers)
+                    or self.stop_event.is_set()
+                ):
+                    return False, "", message
+                self.emit(
+                    "task_update",
+                    index=index,
+                    status="解析中",
+                    progress=0.0,
+                    message=f"二维码/群文件解析失败，正在重试（{attempt + 1}/{attempts}）…",
+                )
+                time.sleep(attempt)
+            except Exception:
+                return False, "", "媒体下载失败，请稍后重试"
+
+        return False, "", "媒体下载失败，请稍后重试"
 
     def _next_output_path(self, source: Path, title: Optional[str] = None) -> Path:
         """Choose a non-destructive destination for an engine-produced file."""
