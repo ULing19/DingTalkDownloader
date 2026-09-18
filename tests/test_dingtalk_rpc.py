@@ -1,6 +1,11 @@
 import json
 import tempfile
 import unittest
+import os
+import ssl
+from unittest import mock
+import dingtalk_rpc as rpc
+import websocket
 from pathlib import Path
 
 from dingtalk_rpc import (
@@ -44,6 +49,47 @@ class _FakeSocket:
 
 
 class DingTalkRpcTests(unittest.TestCase):
+    def test_direct_tls_ignores_proxy_without_mutating_environment(self):
+        raw, tls, result = mock.Mock(), mock.Mock(), mock.Mock()
+        context = mock.Mock()
+        context.wrap_socket.return_value = tls
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1"}), mock.patch.object(websocket, "create_connection", return_value=result) as connect, mock.patch.object(rpc.network_socket, "create_connection", return_value=raw) as tcp, mock.patch.object(rpc.ssl, "create_default_context", return_value=context):
+            self.assertIs(rpc._connect_dingtalk_websocket(rpc.LWP_URL, timeout=4, cookie="private"), result)
+            self.assertEqual(os.environ["HTTPS_PROXY"], "http://127.0.0.1:1")
+        tcp.assert_called_once_with(("webalfa-cm3.dingtalk.com", 443), timeout=4)
+        context.wrap_socket.assert_called_once_with(raw, server_hostname="webalfa-cm3.dingtalk.com")
+        self.assertEqual(connect.call_args.kwargs["socket"], tls)
+        self.assertEqual(connect.call_args.kwargs["redirect_limit"], 0)
+        tls.close.assert_not_called()
+
+    def test_direct_tls_failure_closes_socket_and_does_not_expose_credentials(self):
+        raw = mock.Mock()
+        context = mock.Mock()
+        context.wrap_socket.side_effect = ssl.SSLCertVerificationError("private_cookie")
+        with mock.patch.object(websocket, "create_connection", side_effect=AssertionError("proxy route must not be used")), mock.patch.object(rpc.network_socket, "create_connection", return_value=raw), mock.patch.object(rpc.ssl, "create_default_context", return_value=context):
+            with self.assertRaisesRegex(DingTalkRpcError, "证书") as raised:
+                rpc._connect_dingtalk_websocket(rpc.LWP_URL)
+        raw.close.assert_called_once()
+        self.assertNotIn("private_cookie", str(raised.exception))
+        self.assertNotIn("proxy", str(raised.exception).lower())
+
+    def test_failed_direct_handshake_closes_tls_without_retry(self):
+        raw, tls, context = mock.Mock(), mock.Mock(), mock.Mock()
+        context.wrap_socket.return_value = tls
+        with mock.patch.object(websocket, "create_connection", side_effect=websocket.WebSocketTimeoutException("secret")) as connect, mock.patch.object(rpc.network_socket, "create_connection", return_value=raw), mock.patch.object(rpc.ssl, "create_default_context", return_value=context):
+            with self.assertRaisesRegex(DingTalkRpcError, "超时"):
+                rpc._connect_dingtalk_websocket(rpc.LWP_URL)
+        self.assertEqual(connect.call_count, 1)
+        tls.close.assert_called_once()
+
+    def test_registration_denial_is_never_retried_as_transport_failure(self):
+        fake = _FakeSocket([{"headers": {"mid": "0"}, "code": 401}])
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(websocket, "create_connection", return_value=fake) as connect:
+            with self.assertRaises(DingTalkAuthenticationError):
+                probe_dingtalk_session(self._cookies(root))
+        self.assertEqual(connect.call_count, 1)
+        self.assertTrue(fake.closed)
+
     def _cookies(self, root):
         path = Path(root) / "cookies.json"
         path.write_text(

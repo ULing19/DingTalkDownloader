@@ -1249,13 +1249,31 @@ def build_gui():
 
     global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
 
+    # Opt into per-monitor DPI awareness before Tk creates any windows. This
+    # keeps text and hit targets crisp on 125%/150%/200% displays while Tk and
+    # CustomTkinter continue to scale their widgets normally.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            set_context = getattr(user32, "SetProcessDpiAwarenessContext", None)
+            if set_context is not None:
+                set_context(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+            else:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            # Older Windows builds may not expose either API; Tk still starts
+            # with its compatible system-DPI behavior in that case.
+            pass
+
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
     app = ctk.CTk()
     app.title("钉钉媒体批量下载器")
-    app.geometry("1080x720")
-    app.minsize(900, 600)
+    app.geometry("1120x760")
+    app.minsize(940, 680)
     try:
         if ICON_FILE.exists():
             app.iconbitmap(default=str(ICON_FILE))
@@ -1326,35 +1344,42 @@ def build_gui():
     )
     exe_status.pack(side="right")
 
-    # ---------- 配置行 ----------
+    # ---------- 配置区：分两行，避免窄屏/高缩放时控件互相挤压 ----------
     conf = ctk.CTkFrame(app)
     conf.pack(fill="x", padx=16, pady=4)
 
     ctk.CTkLabel(conf, text="保存目录").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="w")
     save_var = ctk.StringVar(value=str(DEFAULT_SAVE))
-    save_entry = ctk.CTkEntry(conf, textvariable=save_var, width=360)
-    save_entry.grid(row=0, column=1, padx=4, pady=10, sticky="ew")
+    save_entry = ctk.CTkEntry(conf, textvariable=save_var, width=320)
+    save_entry.grid(row=0, column=1, columnspan=4, padx=4, pady=10, sticky="ew")
 
     def browse_save():
         d = filedialog.askdirectory(initialdir=save_var.get() or str(DEFAULT_SAVE))
         if d:
             save_var.set(d)
 
-    ctk.CTkButton(conf, text="浏览…", width=80, command=browse_save).grid(
-        row=0, column=2, padx=4, pady=10
+    ctk.CTkButton(conf, text="浏览…", width=88, command=browse_save).grid(
+        row=0, column=5, padx=(4, 12), pady=10
     )
 
-    ctk.CTkLabel(conf, text="分片线程").grid(row=0, column=3, padx=(16, 6), pady=10)
+    ctk.CTkLabel(conf, text="分片线程").grid(row=1, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
     thread_var = ctk.StringVar(value="10")
-    thread_entry = ctk.CTkEntry(conf, textvariable=thread_var, width=60)
-    thread_entry.grid(row=0, column=4, padx=4, pady=10)
+    thread_entry = ctk.CTkEntry(conf, textvariable=thread_var, width=72)
+    thread_entry.grid(row=1, column=1, padx=4, pady=(0, 10), sticky="w")
 
-    ctk.CTkLabel(conf, text="同时下载").grid(row=0, column=5, padx=(16, 6), pady=10)
+    ctk.CTkLabel(conf, text="同时下载").grid(row=1, column=2, padx=(24, 6), pady=(0, 10), sticky="w")
     video_var = ctk.StringVar(value="2")
-    video_entry = ctk.CTkEntry(conf, textvariable=video_var, width=52)
-    video_entry.grid(row=0, column=6, padx=4, pady=10)
+    video_entry = ctk.CTkEntry(conf, textvariable=video_var, width=72)
+    video_entry.grid(row=1, column=3, padx=4, pady=(0, 10), sticky="w")
+    ctk.CTkLabel(
+        conf,
+        text="数字越大占用的网络和磁盘资源越多",
+        text_color="gray65",
+        font=ctk.CTkFont(size=11),
+    ).grid(row=1, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
 
     conf.grid_columnconfigure(1, weight=1)
+    conf.grid_columnconfigure(4, weight=1)
 
     # ---------- 主体：左输入 / 右任务 ----------
     body = ctk.CTkFrame(app, fg_color="transparent")
@@ -1679,10 +1704,16 @@ def build_gui():
 
     ctrl = ctk.CTkFrame(bottom, fg_color="transparent")
     ctrl.pack(fill="x", padx=12, pady=(0, 10))
+    ctrl.grid_columnconfigure(0, weight=1)
+    ctrl.grid_columnconfigure(1, weight=1)
+    primary_ctrl = ctk.CTkFrame(ctrl, fg_color="transparent")
+    primary_ctrl.grid(row=0, column=0, sticky="w")
+    secondary_ctrl = ctk.CTkFrame(ctrl, fg_color="transparent")
+    secondary_ctrl.grid(row=0, column=1, sticky="e")
 
-    start_btn = ctk.CTkButton(ctrl, text="开始下载", width=120, height=36)
+    start_btn = ctk.CTkButton(primary_ctrl, text="开始下载", width=120, height=36)
     stop_btn = ctk.CTkButton(
-        ctrl,
+        primary_ctrl,
         text="停止",
         width=90,
         height=36,
@@ -1690,13 +1721,13 @@ def build_gui():
         hover_color="#c44",
         state="disabled",
     )
-    parse_btn = ctk.CTkButton(ctrl, text="解析到任务列表", width=130, height=36)
-    open_btn = ctk.CTkButton(ctrl, text="打开保存目录", width=120, height=36)
+    parse_btn = ctk.CTkButton(primary_ctrl, text="解析到任务列表", width=130, height=36)
+    open_btn = ctk.CTkButton(secondary_ctrl, text="打开保存目录", width=120, height=36)
     login_btn = ctk.CTkButton(
-        ctrl, text="重新登录", width=100, height=36, fg_color="#555", hover_color="#666"
+        secondary_ctrl, text="重新登录", width=100, height=36, fg_color="#555", hover_color="#666"
     )
     repo_btn = ctk.CTkButton(
-        ctrl,
+        secondary_ctrl,
         text="GitHub 仓库",
         width=112,
         height=36,
@@ -1704,7 +1735,7 @@ def build_gui():
         hover_color="#2563eb",
     )
     update_btn = ctk.CTkButton(
-        ctrl,
+        secondary_ctrl,
         text="检查更新",
         width=100,
         height=36,
@@ -1932,9 +1963,9 @@ def build_gui():
     stop_btn.pack(side="left", padx=8)
     parse_btn.pack(side="left", padx=8)
     open_btn.pack(side="left", padx=8)
-    login_btn.pack(side="right", padx=0)
-    repo_btn.pack(side="right", padx=(8, 0))
-    update_btn.pack(side="right", padx=(8, 0))
+    login_btn.pack(side="left", padx=8)
+    repo_btn.pack(side="left", padx=8)
+    update_btn.pack(side="left", padx=(8, 0))
 
     def parse_to_tasks():
         if (

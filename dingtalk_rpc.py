@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 import re
+import socket as network_socket
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from dingtalk_titles import extract_replay_title
 
@@ -217,7 +219,59 @@ def _websocket_factory(factory: Optional[Callable[..., Any]]) -> Callable[..., A
         import websocket
     except ImportError as exc:
         raise DingTalkRpcError("缺少钉钉只读接口组件") from exc
-    return websocket.create_connection
+    return _connect_dingtalk_websocket
+
+
+def _network_failure_message(error: Exception) -> str:
+    """Do not expose URLs, cookies or proxy credentials from library errors."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return "钉钉连接的 TLS 证书验证失败，请检查系统日期、根证书或安全软件的 HTTPS 检查"
+    if isinstance(error, network_socket.gaierror):
+        return "无法解析钉钉接口域名，请检查 DNS 或网络连接"
+    if isinstance(error, (TimeoutError, network_socket.timeout)) or "Timeout" in type(error).__name__:
+        return "连接钉钉接口超时，请检查网络、防火墙或代理服务"
+    if isinstance(error, ConnectionRefusedError):
+        return "钉钉接口或代理连接被拒绝，请确认代理已启动或关闭无效代理"
+    if "Proxy" in type(error).__name__:
+        return "钉钉代理连接失败，请检查代理地址、端口及认证设置"
+    return "无法连接钉钉接口，请检查网络、代理或防火墙设置"
+
+
+def _connect_dingtalk_websocket(url: str, *, timeout: float = 8.0, **options):
+    """Open the DingTalk validation socket with verified TLS and no proxy.
+
+    The login checker must not inherit a stale HTTP(S) proxy from a customer's
+    shell or security tool. A preconnected TLS socket is passed to
+    websocket-client because websocket-client 1.8 does not reliably disable
+    environment proxy discovery when ``http_proxy_host`` is omitted. The
+    system environment is never modified, so update requests keep normal
+    routing.
+    """
+    import websocket
+
+    if url != LWP_URL:
+        raise DingTalkRpcError("不支持的钉钉接口地址")
+    options = dict(options)
+    options["redirect_limit"] = 0
+    network_errors = (OSError, websocket.WebSocketException)
+    host = urlparse(url).hostname
+    stream = None
+    try:
+        stream = network_socket.create_connection((host, 443), timeout=timeout)
+        stream = ssl.create_default_context().wrap_socket(stream, server_hostname=host)
+        return websocket.create_connection(url, timeout=timeout, socket=stream, **options)
+    except ssl.SSLCertVerificationError as exc:
+        if stream is not None:
+            stream.close()
+        raise DingTalkRpcError(_network_failure_message(exc)) from None
+    except network_errors as exc:
+        if stream is not None:
+            stream.close()
+        raise DingTalkRpcError(_network_failure_message(exc)) from None
+    except Exception:
+        if stream is not None:
+            stream.close()
+        raise DingTalkRpcError("钉钉直连初始化失败，请检查系统网络组件") from None
 
 
 def _registration_payload(token: str) -> str:
@@ -267,7 +321,7 @@ def probe_dingtalk_session(
     except DingTalkRpcError:
         raise
     except Exception as exc:
-        raise DingTalkRpcError("无法连接钉钉登录校验接口") from exc
+        raise DingTalkRpcError(f"无法连接钉钉登录校验接口：{_network_failure_message(exc)}") from None
     finally:
         if socket is not None:
             try:
