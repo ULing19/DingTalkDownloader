@@ -135,6 +135,14 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(result.read_bytes(), content)
             self.assertEqual(updater.sha256_file(result), hashlib.sha256(content).hexdigest())
             self.assertTrue(progress)
+    def test_release_asset_prefers_canonical_package_when_x86_assets_exist(self):
+        payload = _release_payload()
+        payload["assets"].append(_asset_payload("1.3.0-x86", "Setup", b"x86"))
+        payload["assets"].append(_asset_payload("1.3.0-x86", "Portable", b"x86"))
+        release = updater._parse_release(payload)
+        self.assertEqual(release.asset("Setup").name, "DingTalkDownloader_1.3.0_Setup.exe")
+        self.assertEqual(release.asset("Portable").name, "DingTalkDownloader_1.3.0_Portable.zip")
+
 
     def test_download_asset_removes_partial_file_after_hash_mismatch(self):
         content = b"tampered"

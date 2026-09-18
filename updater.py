@@ -167,6 +167,13 @@ class ReleaseInfo:
             raise UpdateError("更新类型只能是 Setup 或 Portable")
         suffix = f"{kind}.exe" if kind == "Setup" else f"{kind}.zip"
         matches = [asset for asset in self.assets if asset.name.endswith(suffix)]
+        # A release may also publish an explicitly suffixed x86 experiment.
+        # Automatic updates stay on the canonical x64 package; x86 users can
+        # download the matching experimental asset manually.
+        canonical_name = f"DingTalkDownloader_{self.version}_{suffix}"
+        canonical = [asset for asset in matches if asset.name == canonical_name]
+        if len(canonical) == 1:
+            return canonical[0]
         if len(matches) != 1:
             raise UpdateError(f"Release 缺少唯一的 {kind} 更新资产")
         return matches[0]
