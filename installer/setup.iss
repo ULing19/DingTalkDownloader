@@ -2,20 +2,31 @@
 ; 编译：ISCC.exe setup.iss
 ; 源文件目录：dist\DingTalkDownloader_<版本>（由 build_exe.bat 生成）
 
-#define MyAppName "钉钉回放下载器"
+#ifdef X86Build
+  #define MyAppName "钉钉回放下载器 32位实验版"
+  #define MyAppEngine "GoDingtalk_x86.exe"
+  #define PackageSuffix "_x86"
+#else
+  #define MyAppName "钉钉回放下载器"
+  #define MyAppEngine "GoDingtalk_v2.5.2_windows_amd64.exe"
+  #define PackageSuffix ""
+#endif
 #define MyAppNameEn "DingTalkDownloader"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.12"
+  #define MyAppVersion "1.3.13"
 #endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"
-#define MyAppEngine "GoDingtalk_v2.5.2_windows_amd64.exe"
 #ifndef ReleaseDir
   #define ReleaseDir "..\dist\DingTalkDownloader_" + MyAppVersion
 #endif
 
 [Setup]
+#ifdef X86Build
+AppId={{F1B2C3D4-5E6F-4071-8293-A4B5C6D7E8F9}
+#else
 AppId={{A8F3C2E1-7B4D-4E9A-9C1F-2D6B8A0E5F31}
+#endif
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -30,15 +41,18 @@ AllowNoIcons=yes
 ; 安装包与绿色版压缩包归集到同一个版本目录
 OutputDir={#ReleaseDir}
 ; 使用 ASCII 文件名，便于不同 Git 客户端和浏览器稳定下载
-OutputBaseFilename=DingTalkDownloader_{#MyAppVersion}_Setup
+OutputBaseFilename=DingTalkDownloader_{#MyAppVersion}{#PackageSuffix}_Setup
 SetupIconFile=..\assets\download.ico
-Compression=lzma2/ultra64
+Compression=lzma2/normal
+LZMANumBlockThreads=1
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+#ifndef X86Build
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+#endif
 DisableProgramGroupPage=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 安装信息
@@ -55,7 +69,7 @@ CloseApplications=yes
 RestartApplications=no
 ; 较大文件（含 ffmpeg）
 DiskSpanning=no
-InternalCompressLevel=ultra64
+InternalCompressLevel=normal
 
 [Languages]
 ; 简体中文语言包放在 installer\ChineseSimplified.isl（随仓库分发，无需装到 Inno 目录）
@@ -69,7 +83,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 ; 主程序与依赖（发布目录整包安装）
 Source: "{#ReleaseDir}\DingTalkDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#ReleaseDir}\GoDingtalk_v2.5.2_windows_amd64.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ReleaseDir}\{#MyAppEngine}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\mediago.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion

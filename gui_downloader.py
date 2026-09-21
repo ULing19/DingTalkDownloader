@@ -1319,8 +1319,16 @@ def build_gui():
 
     app = ctk.CTk()
     app.title("钉钉媒体批量下载器")
-    app.geometry("1120x760")
-    app.minsize(940, 680)
+    scale = app._get_window_scaling()
+    available_width = max(320, int(app.winfo_screenwidth() / scale) - 24)
+    available_height = max(300, int(app.winfo_screenheight() / scale) - 80)
+    app.geometry(f"{min(1120, available_width)}x{min(760, available_height)}")
+    # Keep the logical minimum compact enough for 125%/150%/200% scaling and
+    # small laptop displays.  The bottom action area is responsive and wraps
+    # into two rows below, so it no longer depends on a single wide row.
+    app.minsize(min(640, available_width), min(440, available_height))
+    app.grid_columnconfigure(0, weight=1)
+    app.grid_rowconfigure(2, weight=1)
     try:
         if ICON_FILE.exists():
             app.iconbitmap(default=str(ICON_FILE))
@@ -1365,7 +1373,7 @@ def build_gui():
 
     # ---------- 顶部工具栏 ----------
     top = ctk.CTkFrame(app, fg_color="transparent")
-    top.pack(fill="x", padx=16, pady=(16, 8))
+    top.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 4))
 
     title_lbl = ctk.CTkLabel(
         top,
@@ -1393,7 +1401,7 @@ def build_gui():
 
     # ---------- 配置区：分两行，避免窄屏/高缩放时控件互相挤压 ----------
     conf = ctk.CTkFrame(app)
-    conf.pack(fill="x", padx=16, pady=4)
+    conf.grid(row=1, column=0, sticky="ew", padx=16, pady=4)
 
     ctk.CTkLabel(conf, text="保存目录").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="w")
     save_var = ctk.StringVar(value=str(DEFAULT_SAVE))
@@ -1430,7 +1438,8 @@ def build_gui():
 
     # ---------- 主体：左输入 / 右任务 ----------
     body = ctk.CTkFrame(app, fg_color="transparent")
-    body.pack(fill="both", expand=True, padx=16, pady=8)
+    body.grid(row=2, column=0, sticky="nsew", padx=16, pady=4)
+    body.grid_propagate(False)
     body.grid_columnconfigure(0, weight=2)
     body.grid_columnconfigure(1, weight=3)
     body.grid_rowconfigure(0, weight=1)
@@ -1733,7 +1742,7 @@ def build_gui():
 
     # ---------- 底部控制 + 总进度 ----------
     bottom = ctk.CTkFrame(app)
-    bottom.pack(fill="x", padx=16, pady=(4, 8))
+    bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 8))
 
     overall_lbl = ctk.CTkLabel(bottom, text="总进度: 就绪")
     overall_lbl.pack(anchor="w", padx=12, pady=(10, 2))
@@ -1741,7 +1750,7 @@ def build_gui():
     overall_bar.pack(fill="x", padx=12, pady=4)
     overall_bar.set(0)
 
-    log_box = ctk.CTkTextbox(bottom, height=90, font=ctk.CTkFont(family="Consolas", size=12))
+    log_box = ctk.CTkTextbox(bottom, height=48, font=ctk.CTkFont(family="Consolas", size=12))
     log_box.pack(fill="x", padx=12, pady=6)
 
     def log(msg: str):
@@ -1751,12 +1760,12 @@ def build_gui():
 
     ctrl = ctk.CTkFrame(bottom, fg_color="transparent")
     ctrl.pack(fill="x", padx=12, pady=(0, 10))
-    ctrl.grid_columnconfigure(0, weight=1)
-    ctrl.grid_columnconfigure(1, weight=1)
+    ctrl.grid_columnconfigure(0, weight=1, uniform="action-row")
+    ctrl.grid_columnconfigure(1, weight=1, uniform="action-row")
+    ctrl.grid_rowconfigure(0, weight=1)
+    ctrl.grid_rowconfigure(1, weight=1)
     primary_ctrl = ctk.CTkFrame(ctrl, fg_color="transparent")
-    primary_ctrl.grid(row=0, column=0, sticky="w")
     secondary_ctrl = ctk.CTkFrame(ctrl, fg_color="transparent")
-    secondary_ctrl.grid(row=0, column=1, sticky="e")
 
     start_btn = ctk.CTkButton(primary_ctrl, text="开始下载", width=120, height=36)
     stop_btn = ctk.CTkButton(
@@ -2006,13 +2015,23 @@ def build_gui():
 
     update_btn.configure(command=lambda: check_updates(True))
 
-    start_btn.pack(side="left", padx=(0, 8))
-    stop_btn.pack(side="left", padx=8)
-    parse_btn.pack(side="left", padx=8)
-    open_btn.pack(side="left", padx=8)
-    login_btn.pack(side="left", padx=8)
-    repo_btn.pack(side="left", padx=8)
-    update_btn.pack(side="left", padx=(8, 0))
+    # Use two independent button rows.  Each button expands inside its cell,
+    # allowing Tk/CustomTkinter to reflow cleanly at high DPI and narrow widths.
+    # The primary actions stay on the first row; utility actions stay together
+    # on the second row instead of being clipped off the right edge.
+    for column in range(3):
+        primary_ctrl.grid_columnconfigure(column, weight=1, uniform="primary")
+    for column in range(4):
+        secondary_ctrl.grid_columnconfigure(column, weight=1, uniform="secondary")
+    primary_ctrl.grid(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(0, 6))
+    secondary_ctrl.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 8))
+    start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+    stop_btn.grid(row=0, column=1, sticky="ew", padx=4)
+    parse_btn.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+    open_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+    login_btn.grid(row=0, column=1, sticky="ew", padx=4)
+    repo_btn.grid(row=0, column=2, sticky="ew", padx=4)
+    update_btn.grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
     def parse_to_tasks():
         if (
