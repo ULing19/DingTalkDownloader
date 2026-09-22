@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -292,6 +293,44 @@ class BrowserSupportTests(unittest.TestCase):
                 self.assertEqual(captured["kwargs"]["cwd"], str(process._profile))
             finally:
                 process.terminate()
+
+    def test_login_launcher_defaults_to_native_godingtalk_path(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        captured = {}
+        sentinel = object()
+
+        def fake_popen(command, *, cwd):
+            captured["command"] = command
+            captured["cwd"] = cwd
+            return sentinel
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DTD_LOGIN_CDP", None)
+            result = launch_login_process(
+                Path(r"C:\App\GoDingtalk.exe"),
+                browser,
+                cwd=Path(r"C:\App"),
+                config_file=Path(r"C:\UserData\config.json"),
+                cookies_file=Path(r"C:\UserData\cookies.json"),
+                popen=fake_popen,
+            )
+        self.assertIs(result, sentinel)
+        self.assertEqual(captured["cwd"], r"C:\App")
+        self.assertIn("-login", captured["command"])
+
+    def test_cdp_login_requires_explicit_opt_in(self):
+        browser = LoginBrowser("Microsoft Edge", Path(r"C:\Browser\msedge.exe"))
+        with mock.patch.dict(os.environ, {"DTD_LOGIN_CDP": "1"}, clear=False), mock.patch.object(
+            browser_support, "_launch_cdp_login", return_value="cdp"
+        ) as launch:
+            result = launch_login_process(
+                Path(r"C:\App\GoDingtalk.exe"),
+                browser,
+                cwd=Path(r"C:\App"),
+                cookies_file=Path(r"C:\UserData\cookies.json"),
+            )
+        self.assertEqual(result, "cdp")
+        launch.assert_called_once()
 
     def test_cookie_reader_requests_only_dingtalk_urls(self):
         target = {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/one"}
