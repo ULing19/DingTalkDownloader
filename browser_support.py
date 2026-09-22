@@ -814,12 +814,15 @@ def launch_login_process(
     cookies_file: Path | str | None = None,
     popen: Optional[Callable[..., Any]] = None,
 ) -> Any:
-    if popen is None and cookies_file is not None:
-        # The bundled GoDingtalk login path relies on chromedp's initial
-        # about:blank tab and is fragile with some newer Edge builds. Use one
-        # isolated CDP session for login, then keep GoDingtalk only for replay
-        # downloads. This also avoids importing or changing the user's normal
-        # browser profile.
+    # Keep GoDingtalk's native login as the default.  It is the path used by
+    # the stable 1.3.9 portable build and works with Edge installations where
+    # an isolated CDP profile cannot expose its DevTools endpoint.  CDP remains
+    # available for targeted diagnostics/experiments via an explicit opt-in.
+    if (
+        popen is None
+        and cookies_file is not None
+        and os.environ.get("DTD_LOGIN_CDP", "").strip().casefold() in {"1", "true", "yes"}
+    ):
         return _launch_cdp_login(browser, cookies_file=cookies_file)
     runner = subprocess.Popen if popen is None else popen
     command = build_login_command(
