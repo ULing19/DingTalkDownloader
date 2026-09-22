@@ -20,7 +20,7 @@
 
 ## 交流与反馈
 
-1.3.15 修复部分 Edge/Windows 环境无法唤起登录窗口的问题：恢复稳定的 GoDingtalk 原生登录链路，避免默认依赖独立 CDP 调试窗口；独立 CDP 仅作为诊断实验开关保留。
+1.3.16 修复部分 Edge/Windows 环境无法唤起登录窗口的问题：恢复稳定的 GoDingtalk 原生登录链路，避免默认依赖独立 CDP 调试窗口；独立 CDP 仅作为诊断实验开关保留。
 
 1.3.13 修复高 DPI、窄屏和低分辨率下底部操作按钮显示不完整的问题：底部按钮改为两行响应式布局，支持 125%/150%/200% 缩放及小尺寸窗口。
 
@@ -39,7 +39,7 @@
 
 ### 32 位实验版
 
-[v1.3.15 Release](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.15) 同时提供 Windows x64 正式安装包/绿色版，以及 Windows x86 实验安装包/绿色版。32 位包中的主程序、GoDingtalk、MediaGo 和 FFmpeg 均为 x86；当前仅在 64 位 Windows 兼容环境完成启动和架构检查，真实 32 位 Windows 请先用短视频验证完整链路。
+[v1.3.16 Release](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.16) 同时提供 Windows x64 正式安装包/绿色版，以及 Windows x86 实验安装包/绿色版。32 位包中的主程序、GoDingtalk、MediaGo 和 FFmpeg 均为 x86；当前仅在 64 位 Windows 兼容环境完成启动和架构检查，真实 32 位 Windows 请先用短视频验证完整链路。
 
 ## 这份 README 怎么读
 

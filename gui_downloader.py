@@ -2223,6 +2223,7 @@ def build_gui():
         *,
         browser_override: Optional[Any] = None,
         attempted_browser_paths: Tuple[Path, ...] = (),
+        force_cdp: bool = False,
     ):
         global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
         nonlocal login_running, login_process
@@ -2323,6 +2324,9 @@ def build_gui():
                 log(f"浏览器路径记忆失败，下次可能需要重新选择：{exc}")
 
         log(f"正在使用 {browser.display_name} 打开钉钉登录…")
+        previous_cdp = os.environ.get("DTD_LOGIN_CDP")
+        if force_cdp:
+            os.environ["DTD_LOGIN_CDP"] = "1"
         try:
             login_process = launch_login_process(
                 exe_path,
@@ -2337,6 +2341,11 @@ def build_gui():
                 return
             messagebox.showerror("登录失败", str(exc))
             return
+        finally:
+            if previous_cdp is None:
+                os.environ.pop("DTD_LOGIN_CDP", None)
+            else:
+                os.environ["DTD_LOGIN_CDP"] = previous_cdp
 
         process = login_process
         login_running = True
@@ -2374,6 +2383,15 @@ def build_gui():
                 detail = f"登录引擎退出码 {return_code}"
             else:
                 detail = probe_result[1]
+            if return_code != 0 and not force_cdp:
+                log("原生登录窗口未完成，正在自动切换备用授权窗口…")
+                do_login(
+                    resume_download,
+                    browser_override=browser,
+                    attempted_browser_paths=attempted_with_current,
+                    force_cdp=True,
+                )
+                return
             if return_code != 0 and retry_with_fallback(detail):
                 return
             log(f"登录未完成：{detail}")
