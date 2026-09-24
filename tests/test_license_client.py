@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import unittest
+import urllib.error
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -27,6 +29,28 @@ class LicenseClientStorageTests(unittest.TestCase):
             license_client._request("/v1/check", {"x": "y"})
         handlers = list(build.call_args.args)
         self.assertTrue(any(isinstance(item, license_client.urllib.request.ProxyHandler) for item in handlers))
+
+    def test_temporary_server_error_uses_offline_fallback(self):
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            license_client.LICENSE_API + "/v1/check", 503, "unavailable", {}, BytesIO(b"{}")
+        )
+        with mock.patch.object(license_client.urllib.request, "build_opener", return_value=opener), \
+             mock.patch.object(license_client, "NETWORK_RETRY_DELAYS_SECONDS", (0, 0)):
+            with self.assertRaises(license_client.LicenseNetworkError):
+                license_client._request("/v1/check", {"device_id": "a" * 64})
+        self.assertEqual(opener.open.call_count, 2)
+
+    def test_explicit_denial_never_uses_offline_fallback(self):
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            license_client.LICENSE_API + "/v1/check", 403, "forbidden", {},
+            BytesIO(b'{"detail":"license revoked"}'),
+        )
+        with mock.patch.object(license_client.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(license_client.LicenseRejectedError, "license revoked"):
+                license_client._request("/v1/check", {"device_id": "a" * 64})
+        opener.open.assert_called_once()
 
     def test_authorize_uses_offline_grace_when_service_is_unreachable(self):
         now = int(time.time())

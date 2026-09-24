@@ -119,6 +119,9 @@ def _request(route: str, body: dict) -> dict:
                     raise LicenseError("授权服务器返回了无效结果。")
                 return payload
         except urllib.error.HTTPError as exc:
+            if exc.code == 429 or 500 <= exc.code <= 599:
+                last_error = exc
+                continue
             try:
                 payload = json.loads(exc.read(8192).decode("utf-8"))
                 detail = payload.get("detail", "授权校验失败")
