@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.3.20
+# DingTalkDownloader release version: 1.3.21
 import os
 
 from PyInstaller.utils.hooks import collect_all
@@ -67,3 +67,4 @@ exe = EXE(
     entitlements_file=None,
     icon=['assets\\download.ico'],
 )
+

@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.20'
+    [string]$Version = '1.3.21'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,3 +83,4 @@ if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
 Write-Host "Installer created: $setup"
 Write-Host "Portable archive: $portable"
 Write-Host "Release folder: $release"
+

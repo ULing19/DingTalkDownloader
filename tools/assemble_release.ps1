@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.20'
+    [string]$Version = '1.3.21'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,3 +132,4 @@ finally {
         Remove-Item -LiteralPath $stage -Recurse -Force
     }
 }
+

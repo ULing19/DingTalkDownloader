@@ -45,7 +45,7 @@ from urllib.parse import urlparse
 
 PROJECT_OWNER = "ULing19"
 PROJECT_REPO = "DingTalkDownloader"
-CURRENT_VERSION = "1.3.20"
+CURRENT_VERSION = "1.3.21"
 RELEASES_API_URL = (
     f"https://api.github.com/repos/{PROJECT_OWNER}/{PROJECT_REPO}/releases/latest"
 )
@@ -783,3 +783,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

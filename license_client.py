@@ -20,6 +20,7 @@ LICENSE_API = "https://license.uling19.com"
 PRODUCT_ENTROPY = b"DingTalkDownloader-license-v1"
 OFFLINE_GRACE_SECONDS = 30 * 24 * 60 * 60
 ONLINE_RECHECK_INTERVAL_SECONDS = 24 * 60 * 60
+NETWORK_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.5)
 
 
 class LicenseError(RuntimeError):
@@ -107,25 +108,31 @@ def _request(route: str, body: dict) -> dict:
         urllib.request.ProxyHandler({}),
         _NoRedirect(),
     )
-    try:
-        with opener.open(request, timeout=15) as response:
-            payload = json.loads(response.read(32_768).decode("utf-8"))
-            if not isinstance(payload, dict) or payload.get("authorized") is not True:
-                raise LicenseError("授权服务器返回了无效结果。")
-            return payload
-    except urllib.error.HTTPError as exc:
+    last_error: Optional[Exception] = None
+    for delay in NETWORK_RETRY_DELAYS_SECONDS:
+        if delay:
+            time.sleep(delay)
         try:
-            payload = json.loads(exc.read(8192).decode("utf-8"))
-            detail = payload.get("detail", "授权校验失败")
-        except Exception:
-            detail = "授权校验失败"
-        raise LicenseRejectedError(str(detail)) from None
-    except LicenseError:
-        raise
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise LicenseNetworkError("无法连接授权服务器，请检查网络后重试。") from None
-    except ValueError:
+            with opener.open(request, timeout=15) as response:
+                payload = json.loads(response.read(32_768).decode("utf-8"))
+                if not isinstance(payload, dict) or payload.get("authorized") is not True:
+                    raise LicenseError("授权服务器返回了无效结果。")
+                return payload
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read(8192).decode("utf-8"))
+                detail = payload.get("detail", "授权校验失败")
+            except Exception:
+                detail = "授权校验失败"
+            raise LicenseRejectedError(str(detail)) from None
+        except LicenseError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last_error = exc
+            continue
+    if isinstance(last_error, ValueError):
         raise LicenseNetworkError("授权服务器返回了无效响应，请稍后重试。") from None
+    raise LicenseNetworkError("无法连接授权服务器，请检查网络后重试。") from None
 
 
 def _load() -> Optional[dict]:

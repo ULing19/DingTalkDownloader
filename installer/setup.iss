@@ -13,7 +13,7 @@
 #endif
 #define MyAppNameEn "DingTalkDownloader"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.20"
+  #define MyAppVersion "1.3.21"
 #endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"
@@ -121,3 +121,4 @@ Type: filesandordirs; Name: "{localappdata}\DingTalkReplayLinkCollector"
 Type: dirifempty; Name: "{app}\video"
 Type: dirifempty; Name: "{app}\.goDingtalkConfig"
 Type: dirifempty; Name: "{app}"
+
