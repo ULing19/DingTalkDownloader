@@ -457,6 +457,7 @@ class TaskItem:
     index: int = 0
     group_name: str = ""
     replay_title: str = ""
+    replay_timestamp: int = 0
     # 任务在解析列表中默认选中；取消选择只影响本次下载，不会删除链接。
     selected: bool = True
 
@@ -466,12 +467,14 @@ def make_task_item(
     index: int,
     group_name: str = "",
     replay_title: str = "",
+    replay_timestamp: int = 0,
 ) -> TaskItem:
     info = classify_dingtalk_url(url)
     return TaskItem(
         url=url,
         group_name=str(group_name or "").strip(),
         replay_title=str(replay_title or "").strip(),
+        replay_timestamp=int(replay_timestamp or 0),
         kind=info.kind,
         kind_label=TASK_KIND_LABELS.get(info.kind, info.label),
         index=index,
@@ -572,15 +575,16 @@ def _metadata_value(metadata: Dict[str, str], url: str) -> str:
 
 
 def _replay_metadata_maps(
-    settings: Dict[str, object], urls: Iterable[str] = (),
+    settings: Dict[str, object], urls: Iterable[str] = (), include_dates: bool = False,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """Resolve hashed local metadata for the supplied replay URLs."""
 
     group_names: Dict[str, str] = {}
     replay_titles: Dict[str, str] = {}
+    replay_timestamps: Dict[str, int] = {}
     raw_metadata = settings.get("replay_metadata")
     if not isinstance(raw_metadata, dict):
-        return group_names, replay_titles
+        return (group_names, replay_titles, replay_timestamps) if include_dates else (group_names, replay_titles)
     for raw_url in dict.fromkeys(str(item or "").strip() for item in urls):
         if not raw_url or classify_dingtalk_url(raw_url).kind != KIND_LIVE:
             continue
@@ -605,7 +609,13 @@ def _replay_metadata_maps(
             group_names[raw_url] = group_name
         if replay_title and len(replay_title) <= 512:
             replay_titles[raw_url] = replay_title
-    return group_names, replay_titles
+        try:
+            timestamp = int(raw_item.get("upload_timestamp") or 0)
+        except (TypeError, ValueError):
+            timestamp = 0
+        if timestamp > 0:
+            replay_timestamps[raw_url] = timestamp
+    return (group_names, replay_titles, replay_timestamps) if include_dates else (group_names, replay_titles)
 
 
 def _hydrate_replay_metadata(
@@ -613,22 +623,35 @@ def _hydrate_replay_metadata(
     urls: Iterable[str],
     group_names: Dict[str, str],
     replay_titles: Dict[str, str],
+    replay_timestamps: Optional[Dict[str, int]] = None,
 ) -> None:
     """Merge persisted live metadata into the current in-memory maps."""
 
     current_urls = list(urls)
-    cached_groups, cached_titles = _replay_metadata_maps(settings, current_urls)
+    if replay_timestamps is None:
+        cached_groups, cached_titles = _replay_metadata_maps(settings, current_urls)
+        cached_dates: Dict[str, int] = {}
+    else:
+        cached_groups, cached_titles, cached_dates = _replay_metadata_maps(
+            settings, current_urls, include_dates=True
+        )
     for url, value in cached_groups.items():
         group_names.setdefault(url, value)
     for url, value in cached_titles.items():
         replay_titles.setdefault(url, value)
-    _retain_url_metadata(current_urls, group_names, replay_titles)
+    if replay_timestamps is not None:
+        for url, value in cached_dates.items():
+            replay_timestamps.setdefault(url, value)
+        _retain_url_metadata(current_urls, group_names, replay_titles, replay_timestamps)
+    else:
+        _retain_url_metadata(current_urls, group_names, replay_titles)
 
 
 def _remember_replay_metadata(
     settings: Dict[str, object],
     group_names: Dict[str, str],
     replay_titles: Dict[str, str],
+    replay_timestamps: Optional[Dict[str, int]] = None,
 ) -> int:
     """Merge current replay metadata into the bounded local settings cache."""
 
@@ -641,15 +664,25 @@ def _remember_replay_metadata(
                 continue
             group_name = str(raw_item.get("group_name") or "").strip()
             replay_title = str(raw_item.get("replay_title") or "").strip()
+            try:
+                upload_timestamp = int(raw_item.get("upload_timestamp") or 0)
+            except (TypeError, ValueError):
+                upload_timestamp = 0
             item: Dict[str, str] = {}
             if group_name and len(group_name) <= 256:
                 item["group_name"] = group_name
             if replay_title and len(replay_title) <= 512:
                 item["replay_title"] = replay_title
+            if upload_timestamp > 0:
+                item["upload_timestamp"] = upload_timestamp
             if item:
                 metadata[key] = item
 
-    ordered_urls = list(dict.fromkeys([*group_names, *replay_titles]))
+    ordered_urls = list(dict.fromkeys([
+        *group_names,
+        *replay_titles,
+        *(replay_timestamps or {}),
+    ]))
     for url in ordered_urls:
         if classify_dingtalk_url(url).kind != KIND_LIVE:
             continue
@@ -661,11 +694,21 @@ def _remember_replay_metadata(
         replay_title = str(
             _metadata_value(replay_titles, url) or previous.get("replay_title") or ""
         ).strip()
+        try:
+            upload_timestamp = int(
+                (replay_timestamps or {}).get(url)
+                or previous.get("upload_timestamp")
+                or 0
+            )
+        except (TypeError, ValueError):
+            upload_timestamp = 0
         item: Dict[str, str] = {}
         if group_name and len(group_name) <= 256:
             item["group_name"] = group_name
         if replay_title and len(replay_title) <= 512:
             item["replay_title"] = replay_title
+        if upload_timestamp > 0:
+            item["upload_timestamp"] = upload_timestamp
         if item:
             metadata[key] = item
     if len(metadata) > MAX_REPLAY_METADATA:
@@ -676,6 +719,56 @@ def _remember_replay_metadata(
 
 def _safe_output_stem(value: str, output_extension: str = "") -> str:
     return safe_output_stem(str(value or ""), output_extension)
+
+
+_TITLE_DATE_RE = re.compile(
+    r"(?<!\d)(20\d{2})[-年./_]?([01]\d)[-月./_]?([0-3]\d)(?:日)?(?!\d)"
+)
+
+
+def _format_replay_upload_date(timestamp: object, title: str = "") -> str:
+    """Format the replay's source date; never substitute today's date."""
+
+    try:
+        value = int(str(timestamp or ""))
+    except (TypeError, ValueError):
+        value = 0
+    if value:
+        try:
+            magnitude = abs(value)
+            if magnitude >= 10**14:
+                value //= 10**6
+            elif magnitude >= 10**11:
+                value //= 10**3
+            date_value = datetime.fromtimestamp(value)
+            if 2000 <= date_value.year <= 2100:
+                return date_value.strftime("%Y%m%d")
+        except (OverflowError, OSError, ValueError):
+            pass
+    match = _TITLE_DATE_RE.search(str(title or ""))
+    if match:
+        try:
+            date_value = datetime.strptime("".join(match.groups()), "%Y%m%d")
+            return date_value.strftime("%Y%m%d")
+        except ValueError:
+            pass
+    return ""
+
+
+def _metadata_timestamp(metadata: Dict[str, int], url: str) -> int:
+    exact = metadata.get(url)
+    if exact:
+        return int(exact)
+    wanted = _canonical_replay_url(url)
+    for candidate, value in metadata.items():
+        if _canonical_replay_url(candidate) == wanted:
+            try:
+                timestamp = int(value)
+            except (TypeError, ValueError):
+                continue
+            if timestamp > 0:
+                return timestamp
+    return 0
 
 
 @dataclass
@@ -707,6 +800,8 @@ class DownloadWorker(threading.Thread):
         video_workers: int = 1,
         config_file: Optional[Path] = None,
         login_browser_path: Optional[Path] = None,
+        prefix_index: bool = False,
+        prefix_date: bool = False,
     ):
         super().__init__(daemon=True)
         self.godingtalk = godingtalk
@@ -721,6 +816,8 @@ class DownloadWorker(threading.Thread):
         self.video_workers = max(1, min(8, int(video_workers or 1)))
         self.config_file = config_file
         self.login_browser_path = login_browser_path
+        self.prefix_index = bool(prefix_index)
+        self.prefix_date = bool(prefix_date)
         # GoDingtalk 的群直播分片请求在并发过高时容易出现
         # ``context deadline exceeded``，尤其是较长回放。把引擎并发和
         # 视频任务并发分开：多个视频仍可并行，但单个回放使用保守并发。
@@ -1052,14 +1149,30 @@ class DownloadWorker(threading.Thread):
                 return candidate
             index += 1
 
+    def _prefixed_title(self, task: Optional[TaskItem], title: str) -> str:
+        value = str(title or "").strip()
+        if task is None:
+            return value
+        parts = []
+        if self.prefix_index:
+            parts.append(f"{task.index + 1:03d}")
+        if self.prefix_date:
+            upload_date = _format_replay_upload_date(
+                task.replay_timestamp,
+                value,
+            )
+            if upload_date:
+                parts.append(upload_date)
+        return "_".join(parts + [value]) if parts else value
+
     def _apply_group_name(self, source: Path, task: TaskItem, title: str = "") -> Path:
         """Apply discovered DingTalk naming metadata without overwriting."""
 
         group = str(task.group_name or "").strip()
         replay_title = str(task.replay_title or "").strip()
-        if not (group or replay_title) or not source.is_file():
+        if not (group or replay_title or self.prefix_index or self.prefix_date) or not source.is_file():
             return source
-        grouped_title = _task_output_title(task, title or source.stem)
+        grouped_title = self._prefixed_title(task, _task_output_title(task, title or source.stem))
         with self._output_lock:
             destination = self._next_output_path(source, grouped_title)
             if destination == source:
@@ -1081,11 +1194,9 @@ class DownloadWorker(threading.Thread):
             # Reserve and move while holding the worker-wide lock. Parallel
             # GoDingtalk processes must not select the same ``title.mp4``.
             with self._output_lock:
-                grouped_title = (
-                    _task_output_title(task, title or source.stem)
-                    if task is not None and (task.group_name or task.replay_title)
-                    else None
-                )
+                grouped_title = None
+                if task is not None and (task.group_name or task.replay_title or self.prefix_index or self.prefix_date):
+                    grouped_title = self._prefixed_title(task, _task_output_title(task, title or source.stem))
                 destination = self._next_output_path(source, grouped_title)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(source), str(destination))
@@ -1292,7 +1403,7 @@ class DownloadWorker(threading.Thread):
 
 def build_gui():
     import customtkinter as ctk
-    from tkinter import BooleanVar, filedialog, messagebox
+    from tkinter import BooleanVar, filedialog, messagebox, simpledialog
 
     global SESSION_PATHS, CONFIG_DIR, CONFIG_FILE, COOKIES_FILE
 
@@ -1370,6 +1481,7 @@ def build_gui():
     closing = False
     url_group_names: Dict[str, str] = {}
     url_replay_titles: Dict[str, str] = {}
+    url_replay_timestamps: Dict[str, int] = {}
 
     # ---------- 顶部工具栏 ----------
     top = ctk.CTkFrame(app, fg_color="transparent")
@@ -1432,6 +1544,19 @@ def build_gui():
         text_color="gray65",
         font=ctk.CTkFont(size=11),
     ).grid(row=1, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
+
+    prefix_index_var = BooleanVar(value=False)
+    prefix_date_var = BooleanVar(value=False)
+    ctk.CTkCheckBox(
+        conf, text="文件名前附加序号", variable=prefix_index_var
+    ).grid(row=2, column=0, columnspan=2, padx=(12, 6), pady=(0, 10), sticky="w")
+    ctk.CTkCheckBox(
+        conf, text="文件名前附加日期", variable=prefix_date_var
+    ).grid(row=2, column=2, columnspan=2, padx=(24, 6), pady=(0, 10), sticky="w")
+    ctk.CTkLabel(
+        conf, text="示例：001_YYYYMMDD_课程标题.mp4（取回放上传日期）", text_color="gray65",
+        font=ctk.CTkFont(size=11),
+    ).grid(row=2, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
 
     conf.grid_columnconfigure(1, weight=1)
     conf.grid_columnconfigure(4, weight=1)
@@ -2052,6 +2177,7 @@ def build_gui():
             urls,
             url_group_names,
             url_replay_titles,
+            url_replay_timestamps,
         )
         previous_selection = {task.url: task.selected for task in state.tasks}
         state.tasks = [
@@ -2060,6 +2186,7 @@ def build_gui():
                 i,
                 _metadata_value(url_group_names, u),
                 _metadata_value(url_replay_titles, u),
+                _metadata_timestamp(url_replay_timestamps, u),
             )
             for i, u in enumerate(urls)
         ]
@@ -2144,10 +2271,19 @@ def build_gui():
                     url_group_names[link.url] = label
                     if link.title:
                         url_replay_titles[link.url] = link.title
+                    if link.upload_timestamp or link.timestamp:
+                        url_replay_timestamps[link.url] = (
+                            link.upload_timestamp or link.timestamp
+                        )
                 added += add_urls(result.urls, f"{label}回放")
                 log(f"已保存“{label}”的 {len(result.links)} 条链接：{destination}")
 
-            _remember_replay_metadata(settings, url_group_names, url_replay_titles)
+            _remember_replay_metadata(
+                settings,
+                url_group_names,
+                url_replay_titles,
+                url_replay_timestamps,
+            )
             save_settings(settings, COLLECTOR_SETTINGS)
             collector_running = False
             collector_btn.configure(state="normal")
@@ -2461,6 +2597,7 @@ def build_gui():
             urls,
             url_group_names,
             url_replay_titles,
+            url_replay_timestamps,
         )
 
         current_task_urls = [task.url for task in state.tasks]
@@ -2471,6 +2608,7 @@ def build_gui():
                     i,
                     _metadata_value(url_group_names, u),
                     _metadata_value(url_replay_titles, u),
+                    _metadata_timestamp(url_replay_timestamps, u),
                 )
                 for i, u in enumerate(urls)
             ]
@@ -2486,6 +2624,9 @@ def build_gui():
                     task.group_name = group_name
                 if replay_title:
                     task.replay_title = replay_title
+                replay_timestamp = _metadata_timestamp(url_replay_timestamps, task.url)
+                if replay_timestamp:
+                    task.replay_timestamp = replay_timestamp
             for index in range(len(state.tasks)):
                 refresh_task_row(index)
 
@@ -2528,6 +2669,36 @@ def build_gui():
                 "当前任务缺少以下组件：\n\n" + "\n".join(f"• {item}" for item in missing),
             )
             return
+
+        # License checks happen before the DingTalk session flow so an expired
+        # entitlement cannot trigger an unrelated login prompt. Code/order data
+        # are encrypted with the current Windows user's DPAPI profile.
+        import license_client
+
+        authorized, license_detail = license_client.authorize()
+        if not authorized:
+            if license_detail.startswith("无法连接授权服务器"):
+                messagebox.showerror("授权服务器不可用", license_detail)
+                log("授权服务器暂不可用，下载未启动。")
+                return
+            if license_detail != "尚未激活" and not messagebox.askyesno(
+                "授权校验未通过", f"{license_detail}\n\n是否重新输入兑换信息？"
+            ):
+                log("授权校验未通过，下载未启动。")
+                return
+            order_id = simpledialog.askstring(
+                "激活下载器", "请输入闲鱼订单号（订单号同时作为兑换码）：", parent=app
+            )
+            if not order_id:
+                log("已取消授权输入，下载未启动。")
+                return
+            authorized, license_detail = license_client.activate(order_id)
+            if not authorized:
+                messagebox.showerror("授权失败", license_detail)
+                log(f"授权失败：{license_detail}")
+                return
+            messagebox.showinfo("授权成功", "本机已绑定此订单授权，可以开始下载。")
+            log("授权成功，本机已绑定闲鱼订单。")
 
         session_status = validate_dingtalk_session(COOKIES_FILE)
         public_shares_only = all(task.kind == KIND_LIVE_SHARE for task in selected_tasks)
@@ -2647,6 +2818,8 @@ def build_gui():
             video_workers=video_workers,
             config_file=CONFIG_FILE,
             login_browser_path=(download_browser.executable if download_browser else None),
+            prefix_index=prefix_index_var.get(),
+            prefix_date=prefix_date_var.get(),
         )
         worker.start()
 

@@ -1,0 +1,23 @@
+[Unit]
+Description=DingTalkDownloader order license service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dingta-license
+Group=dingta-license
+WorkingDirectory=/opt/dingta-license
+EnvironmentFile=/etc/dingta-license.env
+ExecStart=/opt/dingta-license/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8765 --workers 2 --no-server-header
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dingta-license
+
+[Install]
+WantedBy=multi-user.target

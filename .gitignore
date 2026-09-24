@@ -12,6 +12,9 @@ ffmpeg_tmp/
 __pycache__/
 *.py[cod]
 *.log
+.env
+license_service/data/
+license_service/*.sqlite3
 
 # Runtime and release binaries stay out of the source repository.
 *.exe

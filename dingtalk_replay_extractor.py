@@ -305,6 +305,7 @@ class ReplayLink:
     timestamp: int
     discovery_order: int
     title: Optional[str] = None
+    upload_timestamp: int = 0
 
     @property
     def url(self) -> str:
@@ -332,6 +333,7 @@ class _ObservedRecord:
     room_id: str
     timestamp: int
     title: Optional[str] = None
+    upload_timestamp: int = 0
 
 
 @dataclass(frozen=True)
@@ -418,6 +420,29 @@ def _record_timestamp(record: Dict[str, object]) -> int:
         if 10 <= len(str(abs(value))) <= 16:
             values.append(value)
     return max(values, default=0)
+
+
+def _record_upload_timestamp(record: Dict[str, object]) -> int:
+    """Prefer DingTalk's creation/upload timestamp for output date prefixes."""
+
+    for key in (
+        "createTime",
+        "gmtCreate",
+        "createdAt",
+        "uploadTime",
+        "publishTime",
+        "actualStartTime",
+        "liveStartTime",
+        "startTime",
+    ):
+        raw_value = record.get(key)
+        try:
+            value = int(str(raw_value))
+        except (TypeError, ValueError):
+            continue
+        if 10 <= len(str(abs(value))) <= 16:
+            return value
+    return 0
 
 
 def _record_title(record: Dict[str, object]) -> Optional[str]:
@@ -568,6 +593,7 @@ def _parse_replay_record(value: object, cid: str) -> Optional[_ObservedRecord]:
         room_id=room_id,
         timestamp=_record_timestamp(value),
         title=_record_title(value),
+        upload_timestamp=_record_upload_timestamp(value),
     )
 
 
@@ -729,6 +755,7 @@ def _links_from_records(
             timestamp=record.timestamp,
             discovery_order=index,
             title=record.title,
+            upload_timestamp=record.upload_timestamp,
         )
         for index, (live_uuid, record) in enumerate(records.items(), start=1)
     ]

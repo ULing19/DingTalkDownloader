@@ -5,41 +5,44 @@
 <h1 align="center">钉钉回放下载器</h1>
 
 <p align="center">
-  面向 Windows 的中文图形化工具，用于整理和下载你有权访问的钉钉群直播回放、闪记记录，以及群文件/钉盘媒体。
+  Windows 中文桌面工具：整理并下载你有权访问的钉钉群直播回放、闪记记录和群文件/钉盘媒体。
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases">下载发行版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/NAXG/GoDingtalk">GitHub 上游仓库</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0">MediaGo</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_x86_Setup.exe">32 位实验安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/issues">反馈问题</a>
+  <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
+  ·
+  <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-## 交流与反馈
+**当前版本：1.3.19**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
 
-1.3.16 修复部分 Edge/Windows 环境无法唤起登录窗口的问题：恢复稳定的 GoDingtalk 原生登录链路，避免默认依赖独立 CDP 调试窗口；独立 CDP 仅作为诊断实验开关保留。
+## 项目介绍
 
-1.3.13 修复高 DPI、窄屏和低分辨率下底部操作按钮显示不完整的问题：底部按钮改为两行响应式布局，支持 125%/150%/200% 缩放及小尺寸窗口。
+本项目把钉钉内容整理、链接解析、下载和文件检查放在一个图形界面中。支持单条链接，也支持导入多条任务；群回放、闪记、群文件/钉盘会按链接类型交给对应引擎处理。
 
-1.3.12 修复多条二维码/钉盘链接并行解析时前面的任务被 MediaGo 状态冲突影响的问题：二维码任务改为独立保留、串行解析并对短暂网络/解析失败自动重试，不会只剩最后一个任务。
+- 群直播回放优先使用 GoDingtalk 获取完整回放，MediaGo 用作兼容回退；FFmpeg 负责媒体合并。
+- 可选择任务、保存目录、分片线程数和同时下载数量；同名文件会自动编号，避免覆盖。
+- 下载后检查音视频轨道和时间轴；支持安装版、绿色版和版本更新。
+- 可选为文件名添加任务序号和回放日期；日期取回放上传/创建时间或标题日期，不使用下载当天日期。
+- 闲鱼订单授权最多绑定两台设备；授权文件绑定当前 Windows 用户与机器，正常升级后授权保留。
 
-1.3.12 修复已授权后因失效代理导致的登录校验连接失败，钉钉登录校验改为证书验证的直连，并优化高 DPI 与窄屏界面布局。详见 [登录网络修复说明](docs/login-network-fix.md)。
+64 位版本为普通 Windows 用户推荐版本；32 位版本为实验版，尚未在真实 32 位 Windows 设备完成全链路验证。
 
-> `1.3.10` 已接入直播分享短链和按需输入观看密码的流程，并完成两条真实密码分享的完整下载测试。该测试版同时兼容本机旧会话失效和官方返回旧式 HTTP 媒体地址的情况。详见 [测试版使用说明与支持边界](docs/password-sharing.md)。已发布正式版的功能以对应发行说明为准。
+## 下载与交流
 
-- QQ群：`1103756143`
-- 问题反馈：<https://github.com/ULing19/DingTalkDownloader/issues>
+购买与店铺咨询：[打开闲鱼店铺](https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU)。下载器源码、发行文件与版本说明见 [GitHub Releases](https://github.com/ULing19/DingTalkDownloader/releases)；社区交流 QQ 群：**1103756143**。
+
+群回放引擎上游：[NAXG/GoDingtalk](https://github.com/NAXG/GoDingtalk)；MediaGo：[项目发行页](https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0)。
 
 > 本项目不是钉钉官方软件。请只处理你本人有权观看或下载的内容，并遵守钉钉服务条款、版权法规和所在组织的使用规定。
 
 > 严禁将本软件用于盗版传播、侵权分发或其他违法用途；因违规使用产生的后果由使用者自行承担。若当前网络无法访问 GitHub，请忽略软件内的更新提示，继续使用当前版本，并通过项目维护者提供的可信网盘渠道获取更新包，核对版本号、文件名和校验值后再安装。
-
-### 32 位实验版
-
-[v1.3.16 Release](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.16) 同时提供 Windows x64 正式安装包/绿色版，以及 Windows x86 实验安装包/绿色版。32 位包中的主程序、GoDingtalk、MediaGo 和 FFmpeg 均为 x86；当前仅在 64 位 Windows 兼容环境完成启动和架构检查，真实 32 位 Windows 请先用短视频验证完整链路。
 
 ## 这份 README 怎么读
 
@@ -245,13 +248,13 @@
 
 ### 方式一：安装版（推荐）
 
-从 [Releases](https://github.com/ULing19/DingTalkDownloader/releases) 下载 `DingTalkDownloader_1.3.9_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [v1.3.19 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.19) 下载 `DingTalkDownloader_1.3.19_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.9_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.19_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -264,7 +267,7 @@ ffmpeg.exe
 
 压缩包中的两个 JSON 只是 `{}` 占位文件，不含账号数据。软件授权后的真实登录态仍保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，因此不要手动把真实 Cookie 填入绿色包再转发。
 
-绿色版的卸载方式是退出程序后删除解压目录；删除前请备份 `video\`。若要同时清除登录状态，请删除 `%LOCALAPPDATA%\DingTalkDownloader`；若还要清除采集器的标题映射和保存目录记录，请一并删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector`。
+绿色版的卸载方式是退出程序后删除解压目录；删除前请备份 `video\`。仅清除登录状态时删除 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig`；清除授权状态时单独删除 `%LOCALAPPDATA%\DingTalkDownloader\license.dat`。若还要清除采集器的标题映射和保存目录记录，请一并删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector`。
 
 ## 首次使用
 
@@ -275,6 +278,8 @@ ffmpeg.exe
 5. 选择保存目录、单视频分片线程数和同时下载的视频数，点击“开始下载”；只有勾选的项目会进入下载，完成后点击“打开保存目录”。
 
 软件启动后会在后台检查 GitHub Release，也可以点击底部“检查更新”。发现新版时会先展示版本、文件类型和大小，用户确认后才下载；下载完成必须通过 SHA-256 校验。下载任务进行中不会启动更新。安装版由安装程序更新；绿色版由独立进程等待主程序退出，先预备全部新文件和旧文件备份，再原子替换，失败会自动回滚。`video`、`.goDingtalkConfig` 和其它用户文件不会被更新包删除。
+
+授权凭据保存在当前 Windows 用户目录 `%LOCALAPPDATA%\DingTalkDownloader\license.dat`，与程序版本号和安装目录无关。文件使用 Windows DPAPI，并将机器指纹作为附加绑定；复制到另一台电脑不能直接使用。覆盖安装、安装版升级、绿色版更新都不会删除该文件，因此正常升级后无需重新输入订单号；只有主动删除这个文件才会回到“未激活”状态。客户端逻辑仍可能被高级用户修改，真正的设备上限由服务器端校验保障。
 
 登录只证明当前账号的访问能力，不会提升群成员权限。会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，不会自动上传 GitHub 或发送给项目作者。旧版程序目录中的 `.goDingtalkConfig\` 只在目标文件不存在时复制一次，不会被自动删除。不要公开 `cookies.json`、浏览器 Cookie 导出文件、二维码截图中的私密链接或带令牌的日志。
 
@@ -411,4 +416,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.9`。
+当前 GUI/安装包版本：`1.3.19`。

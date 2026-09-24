@@ -1,0 +1,18 @@
+[Unit]
+Description=Sync paid DingTalk downloader orders from Xianyu backend
+After=network-online.target dingta-license.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dingta-license
+Group=dingta-license
+WorkingDirectory=/opt/dingta-license
+EnvironmentFile=/etc/dingta-license.env
+ExecStart=/opt/dingta-license/venv/bin/python -c "from app import _sync_xianyu_orders; print(_sync_xianyu_orders())"
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dingta-license

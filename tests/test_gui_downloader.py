@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime
 import queue
 import tempfile
 import threading
@@ -14,6 +15,34 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_date_prefix_uses_source_date_and_never_today_fallback(self):
+        self.assertEqual(
+            gui._format_replay_upload_date(
+                int(datetime(2026, 8, 29, 12).timestamp()), "课程标题"
+            ),
+            "20260829",
+        )
+        self.assertEqual(gui._format_replay_upload_date(0, "没有日期的标题"), "")
+
+    def test_download_worker_prefixes_index_and_date_when_enabled(self):
+        worker = gui.DownloadWorker.__new__(gui.DownloadWorker)
+        worker.prefix_index = True
+        worker.prefix_date = True
+        task = gui.make_task_item(
+            "https://example.test/replay",
+            4,
+            replay_title="课程标题",
+            replay_timestamp=int(datetime(2026, 9, 23, 12).timestamp()),
+        )
+        self.assertEqual(worker._prefixed_title(task, "课程标题"), "005_20260923_课程标题")
+
+    def test_download_worker_keeps_title_unchanged_by_default(self):
+        worker = gui.DownloadWorker.__new__(gui.DownloadWorker)
+        worker.prefix_index = False
+        worker.prefix_date = False
+        task = gui.make_task_item("https://example.test/replay", 0, replay_title="课程标题")
+        self.assertEqual(worker._prefixed_title(task, "课程标题"), "课程标题")
+
     def test_login_persists_fallback_session_paths_for_downloads(self):
         tree = ast.parse(Path(gui.__file__).read_text(encoding="utf-8"))
         login_functions = [

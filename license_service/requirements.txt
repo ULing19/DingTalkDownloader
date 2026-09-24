@@ -1,0 +1,4 @@
+fastapi>=0.128,<1
+uvicorn[standard]>=0.30,<1
+pymysql>=1.1,<2
+cryptography>=43,<47

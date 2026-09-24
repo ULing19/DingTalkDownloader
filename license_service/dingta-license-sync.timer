@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic Xianyu order sync for DingTalkDownloader authorization
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=165s
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
