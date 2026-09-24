@@ -22,6 +22,8 @@
 
 **当前版本：1.3.19**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
 
+> 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
+
 ## 项目介绍
 
 本项目把钉钉内容整理、链接解析、下载和文件检查放在一个图形界面中。支持单条链接，也支持导入多条任务；群回放、闪记、群文件/钉盘会按链接类型交给对应引擎处理。
@@ -36,7 +38,7 @@
 
 ## 下载与交流
 
-购买与店铺咨询：[打开闲鱼店铺](https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU)。下载器源码、发行文件与版本说明见 [GitHub Releases](https://github.com/ULing19/DingTalkDownloader/releases)；社区交流 QQ 群：**1103756143**。
+购买与店铺咨询：[打开闲鱼店铺](https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU)。下载器源码、唯一公开发行版和版本说明见 [GitHub Releases](https://github.com/ULing19/DingTalkDownloader/releases)；社区交流 QQ 群：**1103756143**。
 
 群回放引擎上游：[NAXG/GoDingtalk](https://github.com/NAXG/GoDingtalk)；MediaGo：[项目发行页](https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0)。
 
