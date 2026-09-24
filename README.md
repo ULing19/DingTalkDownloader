@@ -9,18 +9,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_Setup.exe">下载 64 位安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.20/DingTalkDownloader_1.3.20_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_Portable.zip">下载 64 位绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.20/DingTalkDownloader_1.3.20_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.19/DingTalkDownloader_1.3.19_x86_Setup.exe">32 位实验安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.20/DingTalkDownloader_1.3.20_x86_Setup.exe">32 位实验安装版</a>
   ·
   <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
   ·
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-**当前版本：1.3.19**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
+**当前版本：1.3.20**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
 
 > 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
 
@@ -28,11 +28,18 @@
 
 本项目把钉钉内容整理、链接解析、下载和文件检查放在一个图形界面中。支持单条链接，也支持导入多条任务；群回放、闪记、群文件/钉盘会按链接类型交给对应引擎处理。
 
+### 1.3.20 授权网络容错
+
+- 同一台已成功激活的电脑会保存本地机器绑定租约；最近一次在线校验后 24 小时内不会重复访问授权站点。
+- 授权网站临时不可达时，同一台已绑定电脑可离线继续使用最多 30 天。
+- 服务器撤销、过期或设备超限会在下一次在线校验时停止下载；离线租约期间不主动联网探测，复制授权文件到其他电脑仍不能使用。
+
 - 群直播回放优先使用 GoDingtalk 获取完整回放，MediaGo 用作兼容回退；FFmpeg 负责媒体合并。
 - 可选择任务、保存目录、分片线程数和同时下载数量；同名文件会自动编号，避免覆盖。
 - 下载后检查音视频轨道和时间轴；支持安装版、绿色版和版本更新。
 - 可选为文件名添加任务序号和回放日期；日期取回放上传/创建时间或标题日期，不使用下载当天日期。
 - 闲鱼订单授权最多绑定两台设备；授权文件绑定当前 Windows 用户与机器，正常升级后授权保留。
+- 首次激活或定期刷新需要联网；同机授权后 24 小时内不会重复请求授权站点，授权站点临时不可达时可离线使用最多 30 天。
 
 64 位版本为普通 Windows 用户推荐版本；32 位版本为实验版，尚未在真实 32 位 Windows 设备完成全链路验证。
 
@@ -250,13 +257,13 @@
 
 ### 方式一：安装版（推荐）
 
-从 [v1.3.19 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.19) 下载 `DingTalkDownloader_1.3.19_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [v1.3.20 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.20) 下载 `DingTalkDownloader_1.3.20_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.19_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.20_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -281,7 +288,7 @@ ffmpeg.exe
 
 软件启动后会在后台检查 GitHub Release，也可以点击底部“检查更新”。发现新版时会先展示版本、文件类型和大小，用户确认后才下载；下载完成必须通过 SHA-256 校验。下载任务进行中不会启动更新。安装版由安装程序更新；绿色版由独立进程等待主程序退出，先预备全部新文件和旧文件备份，再原子替换，失败会自动回滚。`video`、`.goDingtalkConfig` 和其它用户文件不会被更新包删除。
 
-授权凭据保存在当前 Windows 用户目录 `%LOCALAPPDATA%\DingTalkDownloader\license.dat`，与程序版本号和安装目录无关。文件使用 Windows DPAPI，并将机器指纹作为附加绑定；复制到另一台电脑不能直接使用。覆盖安装、安装版升级、绿色版更新都不会删除该文件，因此正常升级后无需重新输入订单号；只有主动删除这个文件才会回到“未激活”状态。客户端逻辑仍可能被高级用户修改，真正的设备上限由服务器端校验保障。
+授权凭据保存在当前 Windows 用户目录 `%LOCALAPPDATA%\DingTalkDownloader\license.dat`，与程序版本号和安装目录无关。文件使用 Windows DPAPI，并将机器指纹作为附加绑定；复制到另一台电脑不能直接使用。在线成功校验后会保存本地租约：24 小时内不重复联网，网络异常时最多离线 30 天；服务器撤销、过期或设备超限会在下一次在线校验时生效。覆盖安装、安装版升级、绿色版更新都不会删除该文件，因此正常升级后无需重新输入订单号；只有主动删除这个文件才会回到“未激活”状态。客户端逻辑仍可能被高级用户修改，真正的设备上限由服务器端校验保障。
 
 登录只证明当前账号的访问能力，不会提升群成员权限。会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，不会自动上传 GitHub 或发送给项目作者。旧版程序目录中的 `.goDingtalkConfig\` 只在目标文件不存在时复制一次，不会被自动删除。不要公开 `cookies.json`、浏览器 Cookie 导出文件、二维码截图中的私密链接或带令牌的日志。
 
@@ -418,4 +425,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.19`。
+当前 GUI/安装包版本：`1.3.20`。
