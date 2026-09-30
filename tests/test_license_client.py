@@ -12,6 +12,27 @@ import license_client
 
 
 class LicenseClientStorageTests(unittest.TestCase):
+    def test_online_recheck_sends_only_api_credentials_and_refreshes_lease(self):
+        now = int(time.time())
+        saved = {
+            "order_id": "ORDER-123456", "code": "ORDER-123456",
+            "device_id": "a" * 64,
+            "last_online_at": now - license_client.ONLINE_RECHECK_INTERVAL_SECONDS - 1,
+            "server_expires_at": None,
+            "future_local_metadata": "must stay local",
+            "_legacy_protection": False,
+        }
+        with mock.patch.object(license_client, "_load", return_value=saved), \
+             mock.patch.object(license_client, "_device_id", return_value="a" * 64), \
+             mock.patch.object(license_client, "_request", return_value={"authorized": True, "expires_at": now + 86400}) as request, \
+             mock.patch.object(license_client, "_save") as save:
+            self.assertEqual(license_client.authorize(), (True, "授权有效"))
+        request.assert_called_once_with("/v1/check", {
+            "order_id": saved["order_id"], "code": saved["code"], "device_id": "a" * 64,
+        })
+        self.assertEqual(save.call_args.kwargs["server_expires_at"], now + 86400)
+        self.assertGreaterEqual(save.call_args.kwargs["last_online_at"], now)
+
     def test_license_path_is_version_independent_user_storage(self):
         with TemporaryDirectory() as root:
             with mock.patch.dict(os.environ, {"LOCALAPPDATA": root}, clear=False):

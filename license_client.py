@@ -239,8 +239,13 @@ def authorize() -> tuple[bool, str]:
         ):
             return True, "授权有效"
         device_id = _device_id()
-        payload = {k: v for k, v in saved.items() if not k.startswith("_")}
-        payload["device_id"] = device_id
+        # Local lease metadata is not part of the server's strict API schema.
+        # Explicitly allowlist credentials so future cache fields stay local too.
+        payload = {
+            "order_id": saved["order_id"],
+            "code": saved["code"],
+            "device_id": device_id,
+        }
         try:
             response = _request("/v1/check", payload)
             _save(

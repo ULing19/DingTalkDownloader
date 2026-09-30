@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RootDir,
-    [string]$Version = '1.3.21'
+    [string]$Version = '1.3.22'
 )
 
 $ErrorActionPreference = 'Stop'

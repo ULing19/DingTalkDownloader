@@ -60,6 +60,32 @@ def test_binding_is_idempotent_and_caps_two_devices_per_order(client):
     assert client.post("/v1/check", json=third).status_code == 403
 
 
+def test_client_rechecks_existing_cached_authorization_against_strict_api(client, monkeypatch):
+    import time
+    import license_client
+
+    assert create(client).status_code == 200
+    credentials = {"order_id": "X123456789", "code": "TEST-CODE-012345", "device_id": "a" * 64}
+    assert client.post("/v1/activate", json=credentials).status_code == 200
+    cached = {**credentials, "last_online_at": int(time.time()) - 86401,
+              "server_expires_at": None, "_legacy_protection": False}
+    monkeypatch.setattr(license_client, "_load", lambda: cached)
+    monkeypatch.setattr(license_client, "_device_id", lambda: credentials["device_id"])
+    refreshed = []
+    monkeypatch.setattr(license_client, "_save", lambda *args, **kwargs: refreshed.append(kwargs))
+
+    def request(route, body):
+        result = client.post(route, json=body)
+        assert result.status_code == 200, result.text
+        return result.json()
+
+    monkeypatch.setattr(license_client, "_request", request)
+    assert license_client.authorize() == (True, "授权有效")
+    assert refreshed[0]["last_online_at"] > cached["last_online_at"]
+    item = client.get("/admin/licenses", headers=admin(client)).json()["items"][0]
+    assert item["device_count"] == 1
+
+
 def test_wrong_order_revocation_and_one_code_per_order(client):
     assert create(client).status_code == 200
     assert create(client, code="OTHER-CODE-012345").status_code == 409
