@@ -86,7 +86,7 @@ class DingTalkRpcTests(unittest.TestCase):
         fake = _FakeSocket([{"headers": {"mid": "0"}, "code": 401}])
         with tempfile.TemporaryDirectory() as root, mock.patch.object(websocket, "create_connection", return_value=fake) as connect:
             with self.assertRaises(DingTalkAuthenticationError):
-                probe_dingtalk_session(self._cookies(root))
+                probe_dingtalk_session(self._cookies(root), websocket_factory=connect)
         self.assertEqual(connect.call_count, 1)
         self.assertTrue(fake.closed)
 

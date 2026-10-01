@@ -13,7 +13,7 @@
 #endif
 #define MyAppNameEn "DingTalkDownloader"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.22"
+  #define MyAppVersion "1.3.23"
 #endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"

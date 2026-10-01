@@ -1431,15 +1431,27 @@ def build_gui():
     app = ctk.CTk()
     app.title("钉钉媒体批量下载器")
     scale = app._get_window_scaling()
-    available_width = max(320, int(app.winfo_screenwidth() / scale) - 24)
-    available_height = max(300, int(app.winfo_screenheight() / scale) - 80)
+    available_width = max(220, int(app.winfo_screenwidth() / scale) - 24)
+    available_height = max(140, int(app.winfo_screenheight() / scale) - 80)
     app.geometry(f"{min(1120, available_width)}x{min(760, available_height)}")
     # Keep the logical minimum compact enough for 125%/150%/200% scaling and
-    # small laptop displays.  The bottom action area is responsive and wraps
-    # into two rows below, so it no longer depends on a single wide row.
+    # small laptop displays. The action area wraps and the content scrolls,
+    # so no control depends on fitting the entire form on screen at once.
     app.minsize(min(640, available_width), min(440, available_height))
     app.grid_columnconfigure(0, weight=1)
-    app.grid_rowconfigure(2, weight=1)
+    app.grid_rowconfigure(0, weight=1)
+    class ContentScrollFrame(ctk.CTkScrollableFrame):
+        def _mouse_wheel_all(self, event):
+            widget = event.widget
+            while widget is not None and widget is not self:
+                if isinstance(widget, (ctk.CTkScrollableFrame, ctk.CTkTextbox)):
+                    return
+                widget = getattr(widget, "master", None)
+            super()._mouse_wheel_all(event)
+
+    page = ContentScrollFrame(app, fg_color="transparent")
+    page.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    page.grid_columnconfigure(0, weight=1)
     try:
         if ICON_FILE.exists():
             app.iconbitmap(default=str(ICON_FILE))
@@ -1484,7 +1496,7 @@ def build_gui():
     url_replay_timestamps: Dict[str, int] = {}
 
     # ---------- 顶部工具栏 ----------
-    top = ctk.CTkFrame(app, fg_color="transparent")
+    top = ctk.CTkFrame(page, fg_color="transparent")
     top.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 4))
 
     title_lbl = ctk.CTkLabel(
@@ -1512,7 +1524,7 @@ def build_gui():
     exe_status.pack(side="right")
 
     # ---------- 配置区：分两行，避免窄屏/高缩放时控件互相挤压 ----------
-    conf = ctk.CTkFrame(app)
+    conf = ctk.CTkFrame(page)
     conf.grid(row=1, column=0, sticky="ew", padx=16, pady=4)
 
     ctk.CTkLabel(conf, text="保存目录").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="w")
@@ -1529,40 +1541,46 @@ def build_gui():
         row=0, column=5, padx=(4, 12), pady=10
     )
 
-    ctk.CTkLabel(conf, text="分片线程").grid(row=1, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
+    thread_label = ctk.CTkLabel(conf, text="分片线程")
+    thread_label.grid(row=1, column=0, padx=(12, 6), pady=(0, 10), sticky="w")
     thread_var = ctk.StringVar(value="10")
     thread_entry = ctk.CTkEntry(conf, textvariable=thread_var, width=72)
     thread_entry.grid(row=1, column=1, padx=4, pady=(0, 10), sticky="w")
 
-    ctk.CTkLabel(conf, text="同时下载").grid(row=1, column=2, padx=(24, 6), pady=(0, 10), sticky="w")
+    video_label = ctk.CTkLabel(conf, text="同时下载")
+    video_label.grid(row=1, column=2, padx=(24, 6), pady=(0, 10), sticky="w")
     video_var = ctk.StringVar(value="2")
     video_entry = ctk.CTkEntry(conf, textvariable=video_var, width=72)
     video_entry.grid(row=1, column=3, padx=4, pady=(0, 10), sticky="w")
-    ctk.CTkLabel(
+    tuning_hint = ctk.CTkLabel(
         conf,
         text="数字越大占用的网络和磁盘资源越多",
         text_color="gray65",
         font=ctk.CTkFont(size=11),
-    ).grid(row=1, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
+    )
+    tuning_hint.grid(row=1, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
 
     prefix_index_var = BooleanVar(value=False)
     prefix_date_var = BooleanVar(value=False)
-    ctk.CTkCheckBox(
+    index_checkbox = ctk.CTkCheckBox(
         conf, text="文件名前附加序号", variable=prefix_index_var
-    ).grid(row=2, column=0, columnspan=2, padx=(12, 6), pady=(0, 10), sticky="w")
-    ctk.CTkCheckBox(
+    )
+    index_checkbox.grid(row=2, column=0, columnspan=2, padx=(12, 6), pady=(0, 10), sticky="w")
+    date_checkbox = ctk.CTkCheckBox(
         conf, text="文件名前附加日期", variable=prefix_date_var
-    ).grid(row=2, column=2, columnspan=2, padx=(24, 6), pady=(0, 10), sticky="w")
-    ctk.CTkLabel(
+    )
+    date_checkbox.grid(row=2, column=2, columnspan=2, padx=(24, 6), pady=(0, 10), sticky="w")
+    prefix_hint = ctk.CTkLabel(
         conf, text="示例：001_YYYYMMDD_课程标题.mp4（取回放上传日期）", text_color="gray65",
         font=ctk.CTkFont(size=11),
-    ).grid(row=2, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
+    )
+    prefix_hint.grid(row=2, column=4, columnspan=2, padx=(12, 12), pady=(0, 10), sticky="w")
 
     conf.grid_columnconfigure(1, weight=1)
     conf.grid_columnconfigure(4, weight=1)
 
     # ---------- 主体：左输入 / 右任务 ----------
-    body = ctk.CTkFrame(app, fg_color="transparent")
+    body = ctk.CTkFrame(page, fg_color="transparent", height=380)
     body.grid(row=2, column=0, sticky="nsew", padx=16, pady=4)
     body.grid_propagate(False)
     body.grid_columnconfigure(0, weight=2)
@@ -1571,12 +1589,14 @@ def build_gui():
 
     left = ctk.CTkFrame(body)
     left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    left.grid_columnconfigure(0, weight=1)
+    left.grid_rowconfigure(2, weight=1)
 
     ctk.CTkLabel(
         left,
         text="导入链接 / 二维码",
         font=ctk.CTkFont(size=15, weight="bold"),
-    ).pack(anchor="w", padx=12, pady=(12, 4))
+    ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
 
     hint = ctk.CTkLabel(
         left,
@@ -1585,14 +1605,15 @@ def build_gui():
         font=ctk.CTkFont(size=12),
         wraplength=360,
         justify="left",
+        anchor="w",
     )
-    hint.pack(anchor="w", padx=12, pady=(0, 6))
+    hint.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
 
     textbox = ctk.CTkTextbox(left, font=ctk.CTkFont(family="Consolas", size=13))
-    textbox.pack(fill="both", expand=True, padx=12, pady=4)
+    textbox.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
 
     btn_row = ctk.CTkFrame(left, fg_color="transparent")
-    btn_row.pack(fill="x", padx=12, pady=10)
+    btn_row.grid(row=3, column=0, sticky="ew", padx=12, pady=10)
 
     def add_urls(urls: List[str], source: str = "") -> int:
         existing = set(extract_urls_from_text(textbox.get("1.0", "end")))
@@ -1670,22 +1691,19 @@ def build_gui():
     def clear_input():
         textbox.delete("1.0", "end")
 
-    ctk.CTkButton(btn_row, text="导入文本", command=import_txt, width=100).pack(
-        side="left", padx=(0, 6)
-    )
+    import_button = ctk.CTkButton(btn_row, text="导入文本", command=import_txt, width=100)
     qr_button = ctk.CTkButton(btn_row, text="导入二维码", command=import_qr, width=100)
-    qr_button.pack(side="left", padx=6)
-    ctk.CTkButton(
+    clear_button = ctk.CTkButton(
         btn_row,
         text="清空",
         command=clear_input,
         width=70,
         fg_color="#444",
         hover_color="#555",
-    ).pack(side="left", padx=6)
+    )
 
     group_action_row = ctk.CTkFrame(left, fg_color="transparent")
-    group_action_row.pack(fill="x", padx=12, pady=(0, 10))
+    group_action_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
     collector_btn = ctk.CTkButton(
         group_action_row,
         text="一键获取已打开群回放",
@@ -1693,13 +1711,16 @@ def build_gui():
         fg_color="#2f7d67",
         hover_color="#256653",
     )
-    collector_btn.pack(side="left")
-    ctk.CTkLabel(
+    collector_btn.pack(fill="x")
+    collector_hint = ctk.CTkLabel(
         group_action_row,
         text="自动识别已加载群直播页，按群名保存",
         text_color="gray65",
         font=ctk.CTkFont(size=11),
-    ).pack(side="left", padx=10)
+        justify="left",
+        anchor="w",
+    )
+    collector_hint.pack(fill="x", pady=(4, 0))
 
     # ---------- 右侧任务列表 ----------
     right = ctk.CTkFrame(body)
@@ -1711,9 +1732,9 @@ def build_gui():
         head,
         text="下载任务",
         font=ctk.CTkFont(size=15, weight="bold"),
-    ).pack(side="left")
+    ).pack(anchor="w")
     selection_tools = ctk.CTkFrame(head, fg_color="transparent")
-    selection_tools.pack(side="right")
+    selection_tools.pack(anchor="w")
     select_all_btn = ctk.CTkButton(
         selection_tools,
         text="全选",
@@ -1731,7 +1752,7 @@ def build_gui():
     )
     select_none_btn.pack(side="left", padx=(0, 8))
     task_count_lbl = ctk.CTkLabel(head, text="0 项", text_color="gray70")
-    task_count_lbl.pack(side="right")
+    task_count_lbl.pack(anchor="w")
 
     # 可滚动任务区
     task_scroll = ctk.CTkScrollableFrame(right, label_text="")
@@ -1798,11 +1819,17 @@ def build_gui():
             )
             kind_lbl.pack(side="left", padx=(2, 4))
 
-            name = compact_ui_text(_task_display_title(t, t.title), 24)
+            name = _task_display_title(t, t.title)
             name_lbl = ctk.CTkLabel(
-                top_r, text=name, anchor="w", font=ctk.CTkFont(size=13)
+                fr, text=name, anchor="w", justify="left", wraplength=260, font=ctk.CTkFont(size=13)
             )
-            name_lbl.pack(side="left", fill="x", expand=True, padx=6)
+            name_lbl.pack(fill="x", padx=8, pady=(2, 4))
+            def wrap_task_title(event, label=name_lbl):
+                wrap = max(80, int(event.width / label._get_widget_scaling()) - 32)
+                if label.cget("wraplength") != wrap:
+                    label.configure(wraplength=wrap)
+
+            fr.bind("<Configure>", wrap_task_title)
 
             status_lbl = ctk.CTkLabel(
                 top_r, text=t.status, width=70, font=ctk.CTkFont(size=12)
@@ -1842,7 +1869,7 @@ def build_gui():
         t = state.tasks[i]
         w = row_widgets[i]
         w["selected_var"].set(bool(t.selected))
-        name = compact_ui_text(_task_display_title(t, t.title), 24)
+        name = _task_display_title(t, t.title)
         w["kind"].configure(
             text=t.kind_label,
             text_color="#8ab4f8" if t.kind != KIND_UNKNOWN else "#f07178",
@@ -1866,7 +1893,7 @@ def build_gui():
         w["msg"].configure(text=compact_ui_text(detail or t.url, 52))
 
     # ---------- 底部控制 + 总进度 ----------
-    bottom = ctk.CTkFrame(app)
+    bottom = ctk.CTkFrame(page)
     bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 8))
 
     overall_lbl = ctk.CTkLabel(bottom, text="总进度: 就绪")
@@ -1883,8 +1910,8 @@ def build_gui():
         log_box.insert("end", f"[{ts}] {msg}\n")
         log_box.see("end")
 
-    ctrl = ctk.CTkFrame(bottom, fg_color="transparent")
-    ctrl.pack(fill="x", padx=12, pady=(0, 10))
+    ctrl = ctk.CTkFrame(app)
+    ctrl.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 10))
     ctrl.grid_columnconfigure(0, weight=1, uniform="action-row")
     ctrl.grid_columnconfigure(1, weight=1, uniform="action-row")
     ctrl.grid_rowconfigure(0, weight=1)
@@ -2157,6 +2184,88 @@ def build_gui():
     login_btn.grid(row=0, column=1, sticky="ew", padx=4)
     repo_btn.grid(row=0, column=2, sticky="ew", padx=4)
     update_btn.grid(row=0, column=3, sticky="ew", padx=(4, 0))
+
+    layout_signature = None
+    layout_pending = None
+
+    def responsive_layout():
+        nonlocal layout_signature, layout_pending
+        layout_pending = None
+        scaling = page._get_widget_scaling()
+        width = max(260, int(app.winfo_width() / scaling) - 48)
+        height = int(app.winfo_height() / scaling)
+        signature = (width, height, scaling)
+        if signature == layout_signature:
+            return
+        layout_signature = signature
+        compact = width < 1000
+        narrow = width < 520
+        stacked = width < 820
+
+        # Reflow descriptions rather than letting their requested widths
+        # force the input fields and buttons beyond the right edge.
+        title_lbl.pack_forget()
+        exe_status.pack_forget()
+        title_lbl.pack(anchor="w", side="top" if compact else "left")
+        exe_status.pack(side="top" if compact else "right", anchor="w")
+        exe_status.configure(wraplength=max(200, width - 24), justify="left")
+        save_entry.configure(width=120)
+        if compact:
+            video_label.grid(row=2 if narrow else 1, column=0 if narrow else 2, columnspan=1, padx=(12, 6))
+            video_entry.grid(row=2 if narrow else 1, column=1 if narrow else 3, columnspan=1)
+            tuning_hint.grid(row=3 if narrow else 2, column=0, columnspan=6, sticky="ew")
+            index_checkbox.grid(row=4 if narrow else 3, column=0, columnspan=6 if narrow else 2)
+            date_checkbox.grid(row=5 if narrow else 3, column=0 if narrow else 2, columnspan=6 if narrow else 4, padx=(12, 6))
+            prefix_hint.grid(row=6 if narrow else 4, column=0, columnspan=6, sticky="ew")
+        else:
+            video_label.grid(row=1, column=2, columnspan=1, padx=(24, 6))
+            video_entry.grid(row=1, column=3, columnspan=1)
+            tuning_hint.grid(row=1, column=4, columnspan=2, sticky="w")
+            index_checkbox.grid(row=2, column=0, columnspan=2)
+            date_checkbox.grid(row=2, column=2, columnspan=2, padx=(24, 6))
+            prefix_hint.grid(row=2, column=4, columnspan=2, sticky="w")
+        for label in (tuning_hint, prefix_hint):
+            label.configure(wraplength=max(160, width - 48) if compact else 330, justify="left", anchor="w")
+        overall_lbl.configure(wraplength=max(160, width - 48), justify="left")
+
+        left.grid(row=0, column=0, columnspan=2 if stacked else 1, padx=(0, 0 if stacked else 8))
+        right.grid(row=1 if stacked else 0, column=0 if stacked else 1, columnspan=2 if stacked else 1, pady=(8 if stacked else 0, 0))
+        body.grid_rowconfigure(1, weight=1 if stacked else 0)
+        # Reserve enough height for the import controls and their wrapped
+        # descriptions; the outer content scrolls on shorter displays.
+        body.configure(height=800 if stacked else max(380, height - 380))
+        input_width = width - 36 if stacked else int(width * 0.4) - 40
+        hint.configure(wraplength=max(160, input_width))
+        collector_hint.configure(wraplength=max(160, input_width))
+        import_columns = 2 if input_width < 310 else 3
+        for column in range(3):
+            btn_row.grid_columnconfigure(column, weight=1 if column < import_columns else 0, uniform="import" if column < import_columns else "")
+        for index, button in enumerate((import_button, qr_button, clear_button)):
+            button.configure(width=80)
+            button.grid(row=index // import_columns, column=index % import_columns, sticky="ew", padx=3, pady=3)
+
+        for frame, buttons, columns in (
+            (primary_ctrl, (start_btn, stop_btn, parse_btn), 2 if width < 560 else 3),
+            (secondary_ctrl, (open_btn, login_btn, repo_btn, update_btn), 2 if width < 600 else 4),
+        ):
+            for column in range(4):
+                frame.grid_columnconfigure(column, weight=1 if column < columns else 0, uniform="actions" if column < columns else "", minsize=0)
+            for index, button in enumerate(buttons):
+                button.configure(width=110, height=24 if height < 300 else 36)
+                button.grid(row=index // columns, column=index % columns, sticky="ew", padx=4, pady=2 if height < 300 else 3)
+        primary_ctrl.grid_configure(padx=4, pady=(4, 0))
+        secondary_ctrl.grid_configure(padx=4, pady=(0, 4))
+
+    def request_layout(event=None):
+        nonlocal layout_pending
+        if event is not None and event.widget is not app:
+            return
+        if layout_pending is not None:
+            app.after_cancel(layout_pending)
+        layout_pending = app.after(40, responsive_layout)
+
+    app.bind("<Configure>", request_layout, add="+")
+    app.after_idle(responsive_layout)
 
     def parse_to_tasks():
         if (
