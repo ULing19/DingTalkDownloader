@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +34,7 @@ MAX_DEVICES_PER_ORDER = 2
 CODE_RE = re.compile(r"^[A-Z0-9-]{12,64}$")
 ID_RE = re.compile(r"^[a-f0-9]{32}$")
 app = FastAPI(title="License Service", docs_url=None, redoc_url=None, openapi_url=None)
+_activation_sync_lock = threading.Lock()
 
 
 class StrictModel(BaseModel):
@@ -192,8 +194,13 @@ def _sync_xianyu_orders() -> dict:
     return {"source_count": len(set(order_ids)), "created": created}
 
 
-def _find_license(db, request: Activation):
+def _lookup_license(db, request: Activation):
     row = db.execute("SELECT * FROM licenses WHERE code_hash=?", (_code_hash(request.code),)).fetchone()
+    return row
+
+
+def _find_license(db, request: Activation):
+    row = _lookup_license(db, request)
     if row is None or row["revoked"]:
         raise HTTPException(403, "兑换码无效或已撤销")
     if row["expires_at"] is not None and row["expires_at"] <= int(time.time()):
@@ -222,6 +229,18 @@ def activate(request: Activation):
     now = int(time.time())
     with _db() as db:
         db.execute("BEGIN IMMEDIATE")
+        row = _lookup_license(db, request)
+        if row is None:
+            # A newly delivered order may not have been seen by the 165-second
+            # background timer yet. Refresh once for this activation attempt;
+            # never refresh for revoked, expired, or device-limit failures.
+            db.rollback()
+            try:
+                with _activation_sync_lock:
+                    _sync_xianyu_orders()
+            except Exception:
+                pass
+            db.execute("BEGIN IMMEDIATE")
         row = _find_license(db, request)
         exists = db.execute("SELECT 1 FROM devices WHERE order_hash=? AND device_id=?",
                             (row["order_hash"], request.device_id)).fetchone()

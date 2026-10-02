@@ -86,6 +86,33 @@ def test_client_rechecks_existing_cached_authorization_against_strict_api(client
     assert item["device_count"] == 1
 
 
+def test_activation_refreshes_newly_delivered_order_once(client, monkeypatch):
+    import time
+    service_module = service
+    assert create(client).status_code == 200
+    # Simulate a newly delivered order becoming visible during activation.
+    item = service_module.DB_PATH
+    service_module.DB_PATH.unlink()
+    calls = []
+    original = service_module._sync_xianyu_orders
+    def restore_order():
+        calls.append(True)
+        service_module.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Recreate schema and the same test license through the public admin API.
+        with service_module._db() as db:
+            order_hash = service_module._digest("X123456789", b"order-id\0")
+            db.execute("INSERT INTO licenses VALUES(?,?,?,?,?,?,?,?,?)", (
+                "test-id", order_hash, service_module._mask("X123456789"),
+                service_module._encrypt_order("X123456789"),
+                service_module._digest("TEST-CODE-012345", b"license-code\0"),
+                None, 0, int(time.time()), int(time.time())))
+    monkeypatch.setattr(service_module, "_sync_xianyu_orders", restore_order)
+    payload = {"order_id": "X123456789", "code": "TEST-CODE-012345", "device_id": "a" * 64}
+    result = client.post("/v1/activate", json=payload)
+    assert result.status_code == 200, result.text
+    assert calls == [True]
+
+
 def test_wrong_order_revocation_and_one_code_per_order(client):
     assert create(client).status_code == 200
     assert create(client, code="OTHER-CODE-012345").status_code == 409
