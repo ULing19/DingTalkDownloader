@@ -5,7 +5,7 @@ import unittest
 
 import dingtalk_rpc
 from dingtalk_replay_extractor import _record_title as memory_record_title
-from dingtalk_titles import extract_replay_title
+from dingtalk_titles import extract_replay_cid, extract_replay_title, is_usable_replay_title
 import gui_downloader as gui
 
 
@@ -47,6 +47,92 @@ class ReplayTitleExtractionTests(unittest.TestCase):
         record = {"liveRecord": {"liveName": "RPC/内存标题"}}
         self.assertEqual(dingtalk_rpc._record_title(record), "RPC/内存标题")
         self.assertEqual(memory_record_title(record), "RPC/内存标题")
+
+    def test_nested_placeholder_does_not_hide_a_real_record_title(self):
+        self.assertEqual(
+            extract_replay_title({
+                "title": "直播回放",
+                "recordInfo": {"title": "直播回放"},
+                "liveName": "课程实际名称",
+            }),
+            "课程实际名称",
+        )
+        self.assertEqual(
+            extract_replay_title({
+                "liveInfo": {"title": "直播回放"},
+                "recordInfo": {"title": "课程实际名称"},
+            }),
+            "课程实际名称",
+        )
+
+    def test_nested_metadata_cannot_supply_another_replays_title(self):
+        record = {
+            "liveUuid": "target-live-01",
+            "liveInfo": {"liveUuid": "another-live-02", "title": "其他直播标题"},
+            "liveName": "当前直播标题",
+        }
+        self.assertEqual(extract_replay_title(record), "当前直播标题")
+        record.pop("liveName")
+        self.assertIsNone(extract_replay_title(record))
+
+    def test_nested_matching_identity_and_aliases_keep_the_exact_title(self):
+        self.assertEqual(
+            extract_replay_title({
+                "LIVE_UUID": "target-live-01",
+                "live_info": {
+                    "liveId": "target-live-01",
+                    "PLAYBACK_TITLE": "课程实际名称（第 2 讲）",
+                },
+            }),
+            "课程实际名称（第 2 讲）",
+        )
+
+    def test_usable_title_rejects_placeholders_urls_and_non_text(self):
+        for value in (None, {}, 123, "", "\n ", "直播回放", "群 直播", "https://example.test"):
+            with self.subTest(value=value):
+                self.assertFalse(is_usable_replay_title(value))
+        self.assertTrue(is_usable_replay_title("课程实际名称（第 2 讲）"))
+
+
+class ReplayCidExtractionTests(unittest.TestCase):
+    def test_single_group_is_read_from_either_live_detail_source(self):
+        for record in (
+            {"conversationList": [{"id": "synthetic-group-01", "title": "测试群名称"}]},
+            {"shareCidList": ["synthetic-group-01"]},
+            {
+                "conversationList": [{"id": "synthetic-group-01", "icon": "https://example.test/icon"}],
+                "shareCidList": ["synthetic-group-01", "synthetic-group-01"],
+            },
+        ):
+            with self.subTest(record=record):
+                self.assertEqual(extract_replay_cid(record), "synthetic-group-01")
+
+    def test_group_fields_accept_snake_case_and_capitalization_aliases(self):
+        self.assertEqual(extract_replay_cid({"conversation_id": "synthetic-group-01"}), "synthetic-group-01")
+        self.assertEqual(
+            extract_replay_cid({
+                "CONVERSATION_LIST": [{"CID": "synthetic-group-01"}],
+                "share_cid_list": ["synthetic-group-01"],
+            }),
+            "synthetic-group-01",
+        )
+
+    def test_shares_to_multiple_groups_never_choose_an_arbitrary_group(self):
+        for record in (
+            {"conversationList": [{"id": "group-one"}, {"id": "group-two"}]},
+            {"shareCidList": ["group-one", "group-two"]},
+            {"conversationList": [{"id": "group-one"}], "shareCidList": ["group-two"]},
+        ):
+            with self.subTest(record=record):
+                self.assertEqual(extract_replay_cid(record), "")
+
+    def test_invalid_ids_are_not_used_as_group_context(self):
+        for value in (None, "", True, {}, [], 1.5, "group with spaces", "https://example.test", "../group", "x" * 161):
+            with self.subTest(value=value):
+                self.assertEqual(extract_replay_cid({"cid": value}), "")
+                self.assertEqual(extract_replay_cid({"conversationList": [{"id": value}]}), "")
+                self.assertEqual(extract_replay_cid({"shareCidList": [value]}), "")
+        self.assertEqual(extract_replay_cid({"shareCidList": [None, " group-one ", "https://example.test"]}), "group-one")
 
 
 class ReplayMetadataKeyTests(unittest.TestCase):

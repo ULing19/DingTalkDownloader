@@ -9,18 +9,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.23/DingTalkDownloader_1.3.23_Setup.exe">下载 64 位安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.24/DingTalkDownloader_1.3.24_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.23/DingTalkDownloader_1.3.23_Portable.zip">下载 64 位绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.24/DingTalkDownloader_1.3.24_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.23/DingTalkDownloader_1.3.23_x86_Setup.exe">32 位实验安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.24/DingTalkDownloader_1.3.24_x86_Setup.exe">32 位实验安装版</a>
   ·
   <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
   ·
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-**当前版本：1.3.23**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
+**当前版本：1.3.24**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
 
 > 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
 
@@ -35,6 +35,16 @@
 - 长说明和完整任务标题自动换行，任务选择框、类型与状态独立显示。
 - 输入框可收缩，导入按钮和群回放采集说明保留显示空间；输入区、任务区和主内容区分别滚动。
 - 64 位、32 位共用同一套响应式布局，覆盖常见分辨率和 100%～300% 缩放检查。
+
+### 1.3.24 命名修复
+
+- 下载前核对当前群回放列表，按直播间和回放标识匹配名称；群内改名后，不再始终沿用旧缓存。
+- 手动粘贴的完整回放链接会尝试读取对应回放的详情和所属群，再核对群列表名称。同群并行任务共用一次列表请求。
+- 修复嵌套数据中的“直播回放”等占位标题遮挡真实名称、误用其他回放标题的问题。
+- 链接中的 roomId、liveUuid、URL 后缀和长随机字母数字串不会用作文件名；标题读取失败时使用“钉钉回放”中文兜底，不生成一串链接字符的文件名。
+- 正常的英文、数字课程名会保留，例如 `PythonProgramming101` 和 `20261018English1`；不会仅因包含英文与数字就判为随机标识。
+- 核对失败时保留已有有效名称并在任务完成后标为“需检查”；仅能读到详情标题时也会提示。Windows 文件名不支持的字符会替换为下划线，同名文件自动加编号。
+- 文件名前的序号和日期仍由原有勾选项控制；不会自动重命名以前下载的视频。
 
 ### 授权复查修复
 
@@ -270,13 +280,13 @@
 
 ### 方式一：安装版（推荐）
 
-从 [v1.3.23 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.23) 下载 `DingTalkDownloader_1.3.23_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [v1.3.24 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.24) 下载 `DingTalkDownloader_1.3.24_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
 卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.23_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.24_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -438,4 +448,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.23`。
+当前 GUI/安装包版本：`1.3.24`。

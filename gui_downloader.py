@@ -52,7 +52,10 @@ from dingtalk_rpc import (
     DingTalkAuthenticationError,
     DingTalkRpcError,
     probe_dingtalk_session,
+    get_live_record,
+    list_live_records,
 )
+from dingtalk_titles import is_usable_replay_title
 from dingtalk_replay_extractor import (
     DingTalkNotReadyError,
     IncompleteReplayListError,
@@ -458,6 +461,8 @@ class TaskItem:
     group_name: str = ""
     replay_title: str = ""
     replay_timestamp: int = 0
+    replay_cid: str = ""
+    replay_title_verified: bool = False
     # 任务在解析列表中默认选中；取消选择只影响本次下载，不会删除链接。
     selected: bool = True
 
@@ -484,11 +489,60 @@ def make_task_item(
 def _task_output_title(task: TaskItem, title: str = "") -> str:
     """Prefer the exact DingTalk replay title for the downloaded file."""
 
-    return (
-        str(task.replay_title or "").strip()
-        or str(title or "").strip()
-        or url_short_label(task.url)
+    for candidate, from_metadata in ((task.replay_title, True), (title, False)):
+        if _is_replay_title_for_task(task, candidate, from_metadata=from_metadata) or (
+            task.kind not in {KIND_LIVE, KIND_LIVE_SHARE} and str(candidate or "").strip()
+        ):
+            return str(candidate).strip()
+    if task.kind in {KIND_LIVE, KIND_LIVE_SHARE}:
+        return "钉钉回放"
+    return url_short_label(task.url)
+
+
+def _is_replay_title_for_task(
+    task: TaskItem, value: object, *, from_metadata: bool = False,
+) -> bool:
+    """Reject replay IDs and opaque link suffixes before using a video title."""
+    if not is_usable_replay_title(value):
+        return False
+    text = str(value).strip()
+    if task.kind not in {KIND_LIVE, KIND_LIVE_SHARE}:
+        return True
+
+    identity_text = re.sub(
+        r"\.(?:mp4|mkv|ts|m3u8|mov|webm|m4v|flv|avi|wmv|m4a|mp3|aac|wav)$",
+        "", text, flags=re.IGNORECASE,
     )
+    compact = re.sub(r"[\s.…]+", "", identity_text).casefold()
+    try:
+        query = parse_qs(urlparse(_canonical_replay_url(task.url)).query)
+        identifiers = {
+            item.casefold()
+            for item in (
+                (query.get("roomId") or [""])[0],
+                (query.get("liveUuid") or [""])[0],
+            )
+            if item
+        }
+        if compact in {re.sub(r"\s+", "", item).casefold() for item in identifiers}:
+            return False
+    except Exception:
+        pass
+
+    if compact == re.sub(r"[\s.…]+", "", url_short_label(task.url)).casefold():
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", identity_text):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", identity_text):
+        return False
+    if not from_metadata and len(identity_text) >= 12 and re.fullmatch(r"[A-Za-z0-9_-]+", identity_text):
+        transitions = sum(
+            left.isdigit() != right.isdigit()
+            for left, right in zip(identity_text, identity_text[1:])
+        )
+        if transitions >= 6:
+            return False
+    return True
 
 
 def _task_display_title(task: TaskItem, title: str = "") -> str:
@@ -554,6 +608,18 @@ def _replay_metadata_key(url: str) -> str:
     return f"sha256:{digest}"
 
 
+def _replay_group_cid(settings: Dict[str, object], url: str) -> str:
+    metadata = settings.get("replay_metadata", {})
+    item = metadata.get(_replay_metadata_key(url), {}) if isinstance(metadata, dict) else {}
+    cid = str(item.get("cid") or "").strip() if isinstance(item, dict) else ""
+    if not cid:
+        for key, values in parse_qs(urlparse(url).query).items():
+            if key.casefold() == "cid" and values:
+                cid = str(values[0]).strip()
+                break
+    return cid if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", cid) else ""
+
+
 def _metadata_value(metadata: Dict[str, str], url: str) -> str:
     """Return metadata for equivalent live-URL spellings.
 
@@ -572,6 +638,15 @@ def _metadata_value(metadata: Dict[str, str], url: str) -> str:
             if text:
                 return text
     return ""
+
+
+def _set_metadata_value(metadata: Dict[str, str], url: str, value: str) -> None:
+    """Replace all equivalent URL aliases so an old spelling cannot win later."""
+    wanted = _canonical_replay_url(url)
+    for candidate in tuple(metadata):
+        if _canonical_replay_url(candidate) == wanted:
+            metadata.pop(candidate, None)
+    metadata[url] = value
 
 
 def _replay_metadata_maps(
@@ -636,9 +711,11 @@ def _hydrate_replay_metadata(
             settings, current_urls, include_dates=True
         )
     for url, value in cached_groups.items():
-        group_names.setdefault(url, value)
+        if not _metadata_value(group_names, url):
+            _set_metadata_value(group_names, url, value)
     for url, value in cached_titles.items():
-        replay_titles.setdefault(url, value)
+        if not _metadata_value(replay_titles, url):
+            _set_metadata_value(replay_titles, url, value)
     if replay_timestamps is not None:
         for url, value in cached_dates.items():
             replay_timestamps.setdefault(url, value)
@@ -652,6 +729,7 @@ def _remember_replay_metadata(
     group_names: Dict[str, str],
     replay_titles: Dict[str, str],
     replay_timestamps: Optional[Dict[str, int]] = None,
+    replay_cids: Optional[Dict[str, str]] = None,
 ) -> int:
     """Merge current replay metadata into the bounded local settings cache."""
 
@@ -673,6 +751,9 @@ def _remember_replay_metadata(
                 item["group_name"] = group_name
             if replay_title and len(replay_title) <= 512:
                 item["replay_title"] = replay_title
+            cid = str(raw_item.get("cid") or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", cid):
+                item["cid"] = cid
             if upload_timestamp > 0:
                 item["upload_timestamp"] = upload_timestamp
             if item:
@@ -682,6 +763,7 @@ def _remember_replay_metadata(
         *group_names,
         *replay_titles,
         *(replay_timestamps or {}),
+        *(replay_cids or {}),
     ]))
     for url in ordered_urls:
         if classify_dingtalk_url(url).kind != KIND_LIVE:
@@ -707,6 +789,9 @@ def _remember_replay_metadata(
             item["group_name"] = group_name
         if replay_title and len(replay_title) <= 512:
             item["replay_title"] = replay_title
+        cid = _metadata_value(replay_cids or {}, url) or str(previous.get("cid") or "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", cid):
+            item["cid"] = cid
         if upload_timestamp > 0:
             item["upload_timestamp"] = upload_timestamp
         if item:
@@ -802,6 +887,7 @@ class DownloadWorker(threading.Thread):
         login_browser_path: Optional[Path] = None,
         prefix_index: bool = False,
         prefix_date: bool = False,
+        replay_metadata: Optional[Dict[str, object]] = None,
     ):
         super().__init__(daemon=True)
         self.godingtalk = godingtalk
@@ -818,6 +904,9 @@ class DownloadWorker(threading.Thread):
         self.login_browser_path = login_browser_path
         self.prefix_index = bool(prefix_index)
         self.prefix_date = bool(prefix_date)
+        self.replay_metadata = replay_metadata or {}
+        self._title_lock = threading.Lock()
+        self._group_titles: Dict[str, Future] = {}
         # GoDingtalk 的群直播分片请求在并发过高时容易出现
         # ``context deadline exceeded``，尤其是较长回放。把引擎并发和
         # 视频任务并发分开：多个视频仍可并行，但单个回放使用保守并发。
@@ -937,8 +1026,91 @@ class DownloadWorker(threading.Thread):
             progress=0.0,
             message=f"正在解析{task.kind_label}…",
         )
+        naming_warning = self._refresh_replay_title(index, task)
+        if self.stop_event.is_set():
+            return False, "", "用户停止", False
         self.emit("current", index=index)
-        return self._run_one(index, task)
+        ok, title, message, needs_check = self._run_one(index, task)
+        if task.replay_title_verified:
+            naming_warning = ""
+        elif ok and task.kind in {KIND_LIVE, KIND_LIVE_SHARE} and _task_output_title(task, title) == "钉钉回放":
+            naming_warning = "；".join(part for part in (
+                naming_warning, "未能获取实际回放名称，已用“钉钉回放”保存，可重新采集后重试",
+            ) if part)
+        if ok and naming_warning:
+            message = "；".join(part for part in (message, naming_warning) if part)
+            needs_check = True
+        return ok, title, message, needs_check
+
+    def _titles_for_group(self, cid: str):
+        # Share one read-only list request between parallel videos in a group.
+        with self._title_lock:
+            future = self._group_titles.get(cid)
+            owner = future is None
+            if owner:
+                future = Future()
+                self._group_titles[cid] = future
+        if owner:
+            try:
+                records = list_live_records(cid, self.cookies, timeout=8.0)
+                future.set_result({record.live_uuid: record for record in records})
+            except Exception:
+                future.set_result({})
+        return future.result()
+
+    def _refresh_replay_title(self, index: int, task: TaskItem) -> str:
+        """Prefer the current group-list name, matched by replay and room IDs."""
+        task.replay_title_verified = False
+        if task.kind != KIND_LIVE or not self.cookies.is_file():
+            return ""
+        query = parse_qs(urlparse(_canonical_replay_url(task.url)).query)
+        room_id = (query.get("roomId") or [""])[0]
+        live_uuid = (query.get("liveUuid") or [""])[0]
+        if not room_id or not live_uuid:
+            return ""
+        self.emit("task_update", index=index, message="正在核对群内回放名称…")
+        cid = task.replay_cid or _replay_group_cid(self.replay_metadata, task.url)
+        room_record = None
+        record = None
+        if not cid:
+            try:
+                room_record = get_live_record(room_id, live_uuid, self.cookies)
+                cid = room_record.cid
+            except DingTalkRpcError:
+                pass
+        if cid and not self.stop_event.is_set():
+            candidate = self._titles_for_group(cid).get(live_uuid)
+            if candidate is not None and candidate.room_id == room_id:
+                record = candidate
+        if record is not None and _is_replay_title_for_task(task, record.title, from_metadata=True):
+            title = record.title
+        elif not _is_replay_title_for_task(task, task.replay_title, from_metadata=True):
+            if room_record is None and not self.stop_event.is_set():
+                try:
+                    room_record = get_live_record(room_id, live_uuid, self.cookies)
+                except DingTalkRpcError:
+                    pass
+            title = (
+                room_record.title
+                if room_record is not None and _is_replay_title_for_task(task, room_record.title, from_metadata=True)
+                else ""
+            )
+        else:
+            # A room's original broadcast title must not replace a known
+            # group-list title when the current list could not be read.
+            title = ""
+        if is_usable_replay_title(title):
+            task.replay_title = title.strip()
+            task.replay_cid = cid
+            task.replay_title_verified = record is not None and _is_replay_title_for_task(
+                task, record.title, from_metadata=True,
+            )
+            self.emit(
+                "task_update", index=index, replay_title=task.replay_title,
+                replay_cid=cid, title=task.replay_title, message="已核对回放名称",
+            )
+            return "" if task.replay_title_verified else "群列表名称未能核对，已使用此回放的详情标题"
+        return "群内名称核对失败，已保留已有标题；可重新采集群链接后重试"
 
     def _run_one(self, index: int, task: TaskItem):
         if task.kind == KIND_UNKNOWN:
@@ -1026,6 +1198,22 @@ class DownloadWorker(threading.Thread):
                 password_prompt=lambda message: self._request_viewing_password(index, message),
                 stop_event=self.stop_event,
             )
+            # Short/password shares may resolve to a replay with a newer group
+            # name than the room's original title. Use the same naming path.
+            naming_warning = ""
+            if classify_dingtalk_url(media.canonical_url).kind == KIND_LIVE:
+                resolved_task = make_task_item(
+                    media.canonical_url, task.index, task.group_name,
+                    task.replay_title, task.replay_timestamp,
+                )
+                resolved_task.replay_cid = task.replay_cid or media.cid
+                naming_warning = self._refresh_replay_title(index, resolved_task)
+                if is_usable_replay_title(resolved_task.replay_title):
+                    task.replay_title = resolved_task.replay_title
+                    task.replay_cid = resolved_task.replay_cid
+                    task.replay_title_verified = resolved_task.replay_title_verified
+                if not self.cookies.is_file():
+                    naming_warning = "未登录群列表，已使用分享详情标题或已有名称"
             self.emit("task_update", index=index, title=media.title, message="分享验证成功，正在下载回放…")
             title, output = download_authorized_live(
                 media, self.ffmpeg or Path("__missing_ffmpeg__"), self.save_dir,
@@ -1035,7 +1223,8 @@ class DownloadWorker(threading.Thread):
                 ),
             )
             output = self._apply_group_name(output, task, title)
-            return True, title, media_av_sync_warning(output, require_av=True)
+            warning = media_av_sync_warning(output, require_av=True)
+            return True, title, "；".join(part for part in (warning, naming_warning) if part)
         except LiveShareCancelled:
             raise
         except (LiveShareError, MediaDownloadError) as exc:
@@ -1170,7 +1359,10 @@ class DownloadWorker(threading.Thread):
 
         group = str(task.group_name or "").strip()
         replay_title = str(task.replay_title or "").strip()
-        if not (group or replay_title or self.prefix_index or self.prefix_date) or not source.is_file():
+        if not (
+            group or replay_title or self.prefix_index or self.prefix_date
+            or task.kind in {KIND_LIVE, KIND_LIVE_SHARE}
+        ) or not source.is_file():
             return source
         grouped_title = self._prefixed_title(task, _task_output_title(task, title or source.stem))
         with self._output_lock:
@@ -1195,7 +1387,10 @@ class DownloadWorker(threading.Thread):
             # GoDingtalk processes must not select the same ``title.mp4``.
             with self._output_lock:
                 grouped_title = None
-                if task is not None and (task.group_name or task.replay_title or self.prefix_index or self.prefix_date):
+                if task is not None and (
+                    task.group_name or task.replay_title or self.prefix_index or self.prefix_date
+                    or task.kind in {KIND_LIVE, KIND_LIVE_SHARE}
+                ):
                     grouped_title = self._prefixed_title(task, _task_output_title(task, title or source.stem))
                 destination = self._next_output_path(source, grouped_title)
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2377,9 +2572,9 @@ def build_gui():
                 saved += 1
                 label = result.group_name or f"群 {result.cid}"
                 for link in result.links:
-                    url_group_names[link.url] = label
+                    _set_metadata_value(url_group_names, link.url, label)
                     if link.title:
-                        url_replay_titles[link.url] = link.title
+                        _set_metadata_value(url_replay_titles, link.url, link.title)
                     if link.upload_timestamp or link.timestamp:
                         url_replay_timestamps[link.url] = (
                             link.upload_timestamp or link.timestamp
@@ -2392,6 +2587,7 @@ def build_gui():
                 url_group_names,
                 url_replay_titles,
                 url_replay_timestamps,
+                {link.url: result.cid for result in results for link in result.links},
             )
             save_settings(settings, COLLECTOR_SETTINGS)
             collector_running = False
@@ -2929,6 +3125,7 @@ def build_gui():
             login_browser_path=(download_browser.executable if download_browser else None),
             prefix_index=prefix_index_var.get(),
             prefix_date=prefix_date_var.get(),
+            replay_metadata=load_settings(COLLECTOR_SETTINGS),
         )
         worker.start()
 
@@ -3015,9 +3212,13 @@ def build_gui():
                             "completed_seg",
                             "total_seg",
                             "message",
+                            "replay_title",
+                            "replay_cid",
                         ):
                             if key in ev and ev[key] is not None:
                                 setattr(t, key, ev[key])
+                        if ev.get("replay_title"):
+                            _set_metadata_value(url_replay_titles, t.url, t.replay_title)
                         refresh_task_row(i)
                 elif kind == "overall":
                     done = ev.get("done", 0)
@@ -3044,6 +3245,16 @@ def build_gui():
                         else:
                             callback()
                 elif kind == "finished":
+                    settings = load_settings(COLLECTOR_SETTINGS)
+                    _remember_replay_metadata(
+                        settings, url_group_names, url_replay_titles,
+                        url_replay_timestamps,
+                        {task.url: task.replay_cid for task in state.tasks if task.replay_cid},
+                    )
+                    try:
+                        save_settings(settings, COLLECTOR_SETTINGS)
+                    except OSError:
+                        log("回放名称缓存未能保存，本次下载文件不受影响。")
                     state.running = False
                     refresh_action_states()
                     done = ev.get("done", 0)

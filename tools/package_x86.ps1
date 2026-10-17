@@ -24,6 +24,13 @@ Copy-Item -LiteralPath $GuiExe -Destination (Join-Path $destination 'DingTalkDow
 Copy-Item -LiteralPath (Join-Path $engines 'GoDingtalk_x86.exe') -Destination (Join-Path $destination 'GoDingtalk_x86.exe') -Force
 Copy-Item -LiteralPath (Join-Path $engines 'mediago_x86.exe') -Destination (Join-Path $destination 'mediago.exe') -Force
 Copy-Item -LiteralPath (Join-Path $engines 'ffmpeg_x86.exe') -Destination (Join-Path $destination 'ffmpeg.exe') -Force
+$quickStart = Join-Path $destination 'README.txt'
+if (Test-Path -LiteralPath $quickStart -PathType Leaf) {
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    $text = [IO.File]::ReadAllText($quickStart, $utf8)
+    $text = $text.Replace('GoDingtalk_v2.5.2_windows_amd64.exe', 'GoDingtalk_x86.exe')
+    [IO.File]::WriteAllText($quickStart, $text, $utf8)
+}
 & (Join-Path $root 'tools\make_release_zip.ps1') -SourceDir $destination -Destination (Join-Path $destination "DingTalkDownloader_${Version}_x86_Portable.zip")
 $compiler = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
 & $compiler "/DMyAppVersion=$Version" '/DX86Build' "/DReleaseDir=$destination" (Join-Path $root 'installer\setup.iss')

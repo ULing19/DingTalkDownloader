@@ -9,6 +9,7 @@ from typing import Callable, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from dingtalk_titles import extract_replay_title, extract_replay_cid
 
 ROOM_PAGE = "https://n.dingtalk.com/dingding/live-room/index.html"
 ROOM_INFO_API = "https://lv.dingtalk.com/getLiveRoomPublicInfo"
@@ -42,6 +43,7 @@ class LiveShareMedia:
     title: str
     canonical_url: str = field(repr=False)
     playback_url: str = field(repr=False)
+    cid: str = field(default="", repr=False)
 
 
 def _trusted_page(url: str) -> bool:
@@ -276,11 +278,16 @@ def _parse_room_info(payload: object, room_id: str, live_uuid: str = "") -> Live
     if not _ID.fullmatch(uuid):
         raise LiveShareError("回放缺少有效的标识，暂时无法下载")
     playback = _https_media_url(str(model.get("playbackUrl") or ""))
-    title = str(model.get("title") or "直播回放").strip()[:512]
+    title = extract_replay_title(model) or "直播回放"
     if re.search(r"https?://", title, re.I):
         title = "直播回放"
     title = re.sub(r"[\x00-\x1f\x7f]", " ", title)
-    return LiveShareMedia(title, ROOM_PAGE + "?" + urlencode({"roomId": room_id, "liveUuid": uuid}), playback)
+    room_info = payload.get("roomInfo") or payload.get("roomInfoModel")
+    room_info = room_info if isinstance(room_info, dict) else {}
+    cid = extract_replay_cid(model)
+    if not cid and not (model.get("conversationList") or model.get("shareCidList")):
+        cid = extract_replay_cid(room_info)
+    return LiveShareMedia(title, ROOM_PAGE + "?" + urlencode({"roomId": room_id, "liveUuid": uuid}), playback, cid)
 
 
 def fetch_live_share_info(room_id: str, live_uuid: str, password: str,

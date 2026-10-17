@@ -13,6 +13,7 @@ from dingtalk_rpc import (
     DingTalkRpcError,
     LIST_RECORDS_URI,
     list_live_records,
+    get_live_record,
     probe_dingtalk_session,
 )
 
@@ -49,6 +50,66 @@ class _FakeSocket:
 
 
 class DingTalkRpcTests(unittest.TestCase):
+    def _room_socket(self, details, **extra):
+        return _FakeSocket([
+            {"headers": {"mid": "0 0"}, "code": 200},
+            {"headers": {"mid": "5102001 0"}, "body": {"liveDetails": details, **extra}},
+        ])
+
+    def test_title_lookup_selects_exact_replay_without_playback_url(self):
+        fake = self._room_socket([
+            {"openLiveDetailModel": {"uuid": "other", "title": "其他课程"}},
+            {"openLiveDetailModel": {"uuid": "target", "title": "目标课程"}},
+        ], roomInfo={"cid": TEST_CID})
+        with tempfile.TemporaryDirectory() as root:
+            record = get_live_record(
+                "room001", "target", self._cookies(root),
+                websocket_factory=lambda *args, **kwargs: fake,
+            )
+        self.assertEqual((record.cid, record.room_id, record.live_uuid, record.title),
+                         (TEST_CID, "room001", "target", "目标课程"))
+        self.assertEqual(fake.sent[1]["body"][0]["liveUuid"], "target")
+        self.assertNotIn("password", fake.sent[1]["body"][0])
+        self.assertTrue(fake.closed)
+
+    def test_title_lookup_rejects_missing_ambiguous_or_wrong_room_matches(self):
+        target = {"openLiveDetailModel": {"uuid": "target", "title": "目标课程"}}
+        for details in (
+            [{"openLiveDetailModel": {"uuid": "other", "title": "其他课程"}}],
+            [target, target],
+            [{"openLiveDetailModel": {"uuid": "target", "roomId": "other", "title": "其他课程"}}],
+        ):
+            with self.subTest(details=details), tempfile.TemporaryDirectory() as root:
+                fake = self._room_socket(details)
+                with self.assertRaises(DingTalkRpcError):
+                    get_live_record("room001", "target", self._cookies(root),
+                                    websocket_factory=lambda *args, **kwargs: fake)
+                self.assertTrue(fake.closed)
+
+    def test_title_lookup_rejects_business_error_even_if_title_present(self):
+        fake = self._room_socket([
+            {"openLiveDetailModel": {"uuid": "target", "title": "不能使用的标题"}},
+        ], code="19116")
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(DingTalkRpcError, "观看权限"):
+                get_live_record("room001", "target", self._cookies(root),
+                                websocket_factory=lambda *args, **kwargs: fake)
+        self.assertTrue(fake.closed)
+
+    def test_title_lookup_supports_observed_conversation_and_shared_group_lists(self):
+        fake = self._room_socket([
+            {"openLiveDetailModel": {
+                "uuid": "target", "roomId": "room001", "title": "课程名称",
+                "conversationList": [{"id": TEST_CID, "title": "群名称"}],
+                "shareCidList": [TEST_CID],
+            }},
+        ], roomInfoModel={"roomId": "room001", "title": "直播间旧名称"})
+        with tempfile.TemporaryDirectory() as root:
+            record = get_live_record("room001", "target", self._cookies(root),
+                                     websocket_factory=lambda *args, **kwargs: fake)
+        self.assertEqual(record.cid, TEST_CID)
+        self.assertEqual(record.title, "课程名称")
+
     def test_direct_tls_ignores_proxy_without_mutating_environment(self):
         raw, tls, result = mock.Mock(), mock.Mock(), mock.Mock()
         context = mock.Mock()

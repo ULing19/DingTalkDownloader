@@ -28,6 +28,21 @@ def room_payload(uuid="sampleUuid", playback=PLAYBACK):
 
 
 class LiveShareTests(unittest.TestCase):
+    def test_authorized_share_preserves_target_group_for_title_lookup(self):
+        payload = room_payload()
+        payload["roomInfo"] = {"cid": "fallback-group"}
+        payload["liveDetails"].insert(0, {"openLiveDetailModel": {
+            "uuid": "otherUuid", "title": "其他回放", "cid": "other-group",
+        }})
+        model = payload["liveDetails"][1]["openLiveDetailModel"]
+        model["cid"] = "target-group"
+        model["title"] = "直播回放"
+        model["recordInfo"] = {"title": "群内课程实际名称"}
+        result = share._parse_room_info(payload, "sampleRoom", "sampleUuid")
+        self.assertEqual(result.cid, "target-group")
+        self.assertEqual(result.title, "群内课程实际名称")
+        self.assertNotIn("target-group", repr(result))
+
     def test_classification_and_text_import(self):
         for url in (SHORT, ROOM):
             self.assertEqual(media.classify_dingtalk_url(url).kind, media.KIND_LIVE_SHARE)

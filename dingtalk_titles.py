@@ -116,7 +116,7 @@ _GENERIC_TITLES = {
 def _field_token(value: object) -> str:
     """Compare aliases case-insensitively and across snake/camel case."""
 
-    return re.sub(r"[^\w\u4e00-\u9fff]", "", str(value or "")).casefold()
+    return re.sub(r"[\W_]", "", str(value or "")).casefold()
 
 
 def _lookup(mapping: Mapping[Any, Any], wanted: str) -> Any:
@@ -178,7 +178,25 @@ def _generic(text: str) -> bool:
     }
 
 
-def _scan_mapping(mapping: Mapping[Any, Any], depth: int, seen: Set[int]) -> str:
+def _live_identity(mapping: Mapping[Any, Any]) -> str:
+    """Read only replay IDs, never an unrelated owner or session ``id``."""
+
+    for field in ("liveUuid", "liveId", "uuid"):
+        value = _lookup(mapping, field)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            identity = str(value).strip()
+            if identity:
+                return identity
+    return ""
+
+
+def _scan_mapping(
+    mapping: Mapping[Any, Any], depth: int, seen: Set[int], live_identity: str = ""
+) -> str:
+    identity = _live_identity(mapping)
+    if live_identity and identity and identity != live_identity:
+        return ""
+    live_identity = live_identity or identity
     marker = id(mapping)
     if marker in seen:
         return ""
@@ -206,9 +224,12 @@ def _scan_mapping(mapping: Mapping[Any, Any], depth: int, seen: Set[int]) -> str
             child = _lookup(mapping, field)
             if not isinstance(child, Mapping):
                 continue
-            found = _scan_mapping(child, depth + 1, seen)
-            if found:
+            found = _scan_mapping(child, depth + 1, seen, live_identity)
+            if found and not _generic(found):
                 return found
+            # A placeholder inside a wrapper must not hide a useful title in
+            # another wrapper or in the record's own liveName/name fields.
+            generic_fallback = generic_fallback or found
 
     found = scan_fields(_WEAK_FIELDS)
     return found or generic_fallback
@@ -223,4 +244,42 @@ def extract_replay_title(record: Mapping[Any, Any]) -> Optional[str]:
     return title or None
 
 
-__all__ = ["TITLE_LIMIT", "extract_replay_title"]
+def is_usable_replay_title(value: object) -> bool:
+    """Whether a value names a replay rather than a URL or placeholder."""
+
+    text = _normalize_text(value)
+    return bool(text) and not _generic(text)
+
+
+def extract_replay_cid(record: Mapping[Any, Any]) -> str:
+    """Read one unambiguous group from the target replay's own metadata."""
+    def valid(value: object) -> str:
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            return ""
+        text = str(value).strip()
+        return text if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", text) else ""
+
+    for field in ("cid", "conversationId"):
+        cid = valid(_lookup(record, field))
+        if cid:
+            return cid
+    candidates = set()
+    conversations = _lookup(record, "conversationList")
+    if isinstance(conversations, list):
+        for conversation in conversations:
+            if isinstance(conversation, Mapping):
+                cid = valid(_lookup(conversation, "cid") or _lookup(conversation, "id"))
+                if cid:
+                    candidates.add(cid)
+    shared = _lookup(record, "shareCidList")
+    if isinstance(shared, list):
+        for value in shared:
+            cid = valid(value)
+            if cid:
+                candidates.add(cid)
+    # A share may be forwarded into several groups with different list titles.
+    # Do not choose an arbitrary group when the original URL has no context.
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
+__all__ = ["TITLE_LIMIT", "extract_replay_title", "is_usable_replay_title", "extract_replay_cid"]

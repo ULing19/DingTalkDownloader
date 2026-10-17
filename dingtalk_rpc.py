@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import unquote, urlparse
 
-from dingtalk_titles import extract_replay_title
+from dingtalk_titles import extract_replay_title, extract_replay_cid
 
 
 LWP_URL = "wss://webalfa-cm3.dingtalk.com/long"
@@ -330,6 +330,75 @@ def probe_dingtalk_session(
                 pass
 
 
+def get_live_record(
+    room_id: str,
+    live_uuid: str,
+    cookies_path: Path,
+    *,
+    websocket_factory: Optional[Callable[..., Any]] = None,
+    timeout: float = 8.0,
+) -> RpcReplayRecord:
+    """Read title metadata for exactly one replay, without fetching media."""
+
+    if not ID_RE.fullmatch(room_id) or not ID_RE.fullmatch(live_uuid):
+        raise DingTalkRpcError("回放标识格式无效")
+    token, cookie_header = _cookie_connection_material(Path(cookies_path))
+    factory = _websocket_factory(websocket_factory)
+    socket = None
+    try:
+        socket = factory(
+            LWP_URL, timeout=timeout, cookie=cookie_header,
+            header=[f"User-Agent: {PC_USER_AGENT}"],
+        )
+        socket.send(_registration_payload(token))
+        _receive_for_mid(socket, "0")
+        socket.send(json.dumps({
+            "lwp": "/r/Adaptor/LiveRoom/getLiveRoomInfo",
+            "headers": {"mid": "5102001 0"},
+            "body": [{"roomId": room_id, "liveUuid": live_uuid, "mustReturnRoomInfo": True}],
+        }, separators=(",", ":")))
+        body = _response_body(_receive_for_mid(socket, "5102001"))
+        if str(body.get("code") or "0") != "0":
+            raise DingTalkRpcError("无法读取回放标题，请确认观看权限")
+        details = body.get("liveDetails")
+        if not isinstance(details, list):
+            raise DingTalkRpcError("回放标题响应缺少记录")
+        matches = []
+        for detail in details:
+            model = detail.get("openLiveDetailModel") if isinstance(detail, Mapping) else None
+            if not isinstance(model, Mapping):
+                continue
+            if str(_record_value(model, "uuid", "liveUuid", "liveId")) != live_uuid:
+                continue
+            returned_room = str(_record_value(model, "fromRoomId", "roomId"))
+            if returned_room and returned_room != room_id:
+                raise DingTalkRpcError("回放标题与目标直播间不一致")
+            matches.append(model)
+        if len(matches) != 1:
+            raise DingTalkRpcError("未找到唯一匹配的回放标题")
+        model = matches[0]
+        room_info = body.get("roomInfo") or body.get("roomInfoModel")
+        room_info = room_info if isinstance(room_info, Mapping) else {}
+        cid = extract_replay_cid(model)
+        if not cid and not (model.get("conversationList") or model.get("shareCidList")):
+            cid = extract_replay_cid(room_info)
+        return RpcReplayRecord(
+            cid=cid if CID_RE.fullmatch(cid) else "",
+            room_id=room_id, live_uuid=live_uuid,
+            title=_record_title(model), timestamp=_timestamp(model),
+        )
+    except DingTalkRpcError:
+        raise
+    except Exception:
+        raise DingTalkRpcError("无法连接钉钉标题读取接口") from None
+    finally:
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:
+                pass
+
+
 def list_live_records(
     cid: str,
     cookies_path: Path,
@@ -410,6 +479,7 @@ __all__ = [
     "DingTalkAuthenticationError",
     "DingTalkRpcError",
     "RpcReplayRecord",
+    "get_live_record",
     "list_live_records",
     "probe_dingtalk_session",
 ]
