@@ -1141,7 +1141,11 @@ class _MemoryBasicInformation(ctypes.Structure):
         ("BaseAddress", ctypes.c_void_p),
         ("AllocationBase", ctypes.c_void_p),
         ("AllocationProtect", wintypes.DWORD),
-        ("PartitionId", wintypes.WORD),
+    ] + (
+        # The native x86 layout has no PartitionId: RegionSize starts at
+        # byte 12 (28 bytes total), not byte 16 as in a padded x64 layout.
+        [("PartitionId", wintypes.WORD)] if ctypes.sizeof(ctypes.c_void_p) == 8 else []
+    ) + [
         ("RegionSize", ctypes.c_size_t),
         ("State", wintypes.DWORD),
         ("Protect", wintypes.DWORD),
@@ -1195,7 +1199,10 @@ def iter_process_memory_chunks(
     page_noaccess = 0x0001
     readable = {0x0002, 0x0004, 0x0008, 0x0020, 0x0040, 0x0080}
     address = 0
-    max_address = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8 - 1)) - 1
+    pointer_bits = ctypes.sizeof(ctypes.c_void_p) * 8
+    # Large-address-aware x86 processes can allocate above 2 GiB on Windows.
+    # VirtualQueryEx stops us at the actual process address-space boundary.
+    max_address = (1 << (pointer_bits if pointer_bits == 32 else pointer_bits - 1)) - 1
     previous_end: Optional[int] = None
     overlap = b""
     mbi = _MemoryBasicInformation()
@@ -1453,6 +1460,11 @@ def atomic_write_links(path: Path, urls: Iterable[str]) -> None:
     parent = destination.parent
     if not parent.is_dir():
         raise ReplayExtractionError("保存目录不存在")
+    # Use one physical parent for the temp file and its atomic destination.
+    # Windows AppX redirection/junctions can otherwise make a same-directory
+    # rename appear to cross volumes. Preserve final-component link semantics.
+    parent = parent.resolve(strict=True)
+    destination = parent / destination.name
     normalized: List[str] = []
     seen: Set[str] = set()
     strict = re.compile(

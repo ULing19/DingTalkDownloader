@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dingtalk_replay_extractor import ReplayExtractionResult, ReplayLink
 from replay_link_collector import (
@@ -15,6 +18,7 @@ from replay_link_collector import (
     remember_destination,
     resolve_customer_root,
     safe_group_folder_name,
+    save_settings,
 )
 
 
@@ -108,6 +112,45 @@ class ReplayLinkCollectorTests(unittest.TestCase):
             loaded = load_settings(settings_path)
             self.assertEqual(saved, root_path.resolve())
             self.assertEqual(resolve_customer_root(loaded), root_path.resolve())
+
+    def test_settings_atomic_write_uses_resolved_parent(self):
+        with tempfile.TemporaryDirectory() as root:
+            alias = Path(root) / "alias"
+            physical = Path(root) / "physical"
+            alias.mkdir()
+            physical.mkdir()
+            physical = physical.resolve()
+            original_resolve = Path.resolve
+
+            def resolve_parent(path, *args, **kwargs):
+                if path == alias:
+                    return physical
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "resolve", resolve_parent), mock.patch(
+                "replay_link_collector.os.replace", wraps=os.replace
+            ) as replace_file:
+                save_settings({"destinations": {}, "keep": True}, alias / "settings.json")
+
+            source, destination = map(Path, replace_file.call_args.args)
+            self.assertEqual(source.parent, physical)
+            self.assertEqual(destination, physical / "settings.json")
+            self.assertFalse((alias / "settings.json").exists())
+            self.assertTrue(json.loads(destination.read_text(encoding="utf-8"))["keep"])
+            self.assertEqual(list(physical.glob("*.tmp")), [])
+
+    def test_settings_replace_failure_keeps_existing_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "settings.json"
+            original = {"destinations": {}, "keep": "original"}
+            save_settings(original, destination)
+            with mock.patch(
+                "replay_link_collector.os.replace", side_effect=OSError(17, "blocked")
+            ):
+                with self.assertRaises(OSError):
+                    save_settings({"destinations": {}}, destination)
+            self.assertEqual(load_settings(destination), original)
+            self.assertEqual(list(Path(root).glob("*.tmp")), [])
 
     def test_missing_customer_root_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as root:

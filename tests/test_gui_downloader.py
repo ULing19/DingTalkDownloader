@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 from datetime import datetime
 import queue
 import tempfile
@@ -15,6 +16,26 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_collection_storage_errors_include_stage_and_codes_not_private_data(self):
+        error = OSError(errno.EXDEV, "private URL and group", "private-settings.json")
+        error.winerror = 17
+        message = gui._collection_io_error_message(error, "保存采集配置")
+        self.assertIn("保存采集配置", message)
+        self.assertIn("WinError 17", message)
+        self.assertIn(f"errno {errno.EXDEV}", message)
+        self.assertNotIn("private", message)
+
+    def test_collection_storage_errors_distinguish_permissions_and_disk_full(self):
+        for error, expected in (
+            (PermissionError(errno.EACCES, "private"), "没有写入权限"),
+            (OSError(errno.ENOSPC, "private"), "磁盘空间不足"),
+            (OSError("private"), "无法写入本地文件"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                message = gui._collection_io_error_message(error, "保存回放链接")
+                self.assertIn(expected, message)
+                self.assertNotIn("private", message)
+
     def test_date_prefix_uses_source_date_and_never_today_fallback(self):
         self.assertEqual(
             gui._format_replay_upload_date(

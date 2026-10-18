@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import os
 import re
 import sys
@@ -118,6 +119,27 @@ COLLECTOR_SETTINGS = (
 )
 MAX_REPLAY_METADATA = 5000
 _SINGLE_INSTANCE_HANDLE: Optional[int] = None
+
+
+def _collection_io_error_message(error: OSError, stage: str) -> str:
+    """Describe local storage failures without leaking paths or replay links."""
+
+    winerror = getattr(error, "winerror", None)
+    if isinstance(error, PermissionError) or winerror == 5:
+        reason = "没有写入权限，请选择可写文件夹或关闭占用文件的程序。"
+    elif error.errno == errno.ENOSPC or winerror in (39, 112):
+        reason = "磁盘空间不足，请释放空间后重试。"
+    elif error.errno == errno.EXDEV or winerror == 17:
+        reason = "Windows 目录重定向导致跨磁盘替换失败，请反馈此错误码。"
+    else:
+        reason = "无法写入本地文件，请检查文件夹权限、磁盘状态或文件占用。"
+    codes = []
+    if isinstance(winerror, int):
+        codes.append(f"WinError {winerror}")
+    if isinstance(error.errno, int):
+        codes.append(f"errno {error.errno}")
+    suffix = f"（{'，'.join(codes)}）" if codes else ""
+    return f"{stage}失败：{reason}{suffix}"
 
 
 def _acquire_single_instance(
@@ -2507,21 +2529,23 @@ def build_gui():
         summary = "、".join(f"{label} {count}" for label, count in counts.items() if count)
         log(f"已解析 {len(urls)} 条任务（{summary}）")
 
-    def _collector_error_message(error: Exception) -> str:
+    def _collector_error_message(error: Exception, stage: str) -> str:
         if isinstance(error, DingTalkNotReadyError):
             return "请先在钉钉登录并打开需要采集的群直播页，切换到“全部”后重试。"
         if isinstance(error, IncompleteReplayListError):
             return str(error)
         if isinstance(error, ReplayExtractionError):
             return str(error)
+        if isinstance(error, OSError):
+            return _collection_io_error_message(error, stage)
         return "程序处理采集结果时发生错误，请重试；若仍出现请反馈日志时间。"
 
-    def _collector_failed(error: Exception) -> None:
+    def _collector_failed(error: Exception, stage: str = "处理采集结果") -> None:
         nonlocal collector_running
         collector_running = False
         collector_btn.configure(state="normal")
         refresh_action_states()
-        message = _collector_error_message(error)
+        message = _collector_error_message(error, stage)
         log(f"一键获取群链接失败：{message}（{type(error).__name__}）")
         messagebox.showerror("一键获取群链接失败", message)
 
@@ -2538,9 +2562,11 @@ def build_gui():
             messagebox.showerror("一键采集失败", detail)
             return
 
+        stage = "读取保存目录"
         try:
             settings = load_settings(COLLECTOR_SETTINGS)
             initial_directory = resolve_customer_root(settings) or Path.home()
+            stage = "选择保存目录"
             selected = filedialog.askdirectory(
                 parent=app,
                 title="选择已打开群回放的保存根目录",
@@ -2549,6 +2575,7 @@ def build_gui():
             )
             if not selected:
                 raise ReplayExtractionError("已取消选择保存根目录，没有覆盖任何链接文件")
+            stage = "保存采集配置"
             root_directory = remember_customer_root(
                 Path(selected),
                 settings,
@@ -2566,8 +2593,10 @@ def build_gui():
                     folder_name = f"{folder_name}（{result.cid}）"
                 used_names[key] = result.cid
                 group_directory = root_directory / folder_name
+                stage = "创建群回放文件夹"
                 group_directory.mkdir(parents=True, exist_ok=True)
                 destination = group_directory / LINK_FILE_NAME
+                stage = "保存回放链接"
                 atomic_write_links(destination, result.urls)
                 saved += 1
                 label = result.group_name or f"群 {result.cid}"
@@ -2589,6 +2618,7 @@ def build_gui():
                 url_replay_timestamps,
                 {link.url: result.cid for result in results for link in result.links},
             )
+            stage = "保存回放名称配置"
             save_settings(settings, COLLECTOR_SETTINGS)
             collector_running = False
             collector_btn.configure(state="normal")
@@ -2606,7 +2636,7 @@ def build_gui():
                 + (f"\n有 {len(errors)} 个群未完成，请查看日志。" if errors else ""),
             )
         except Exception as exc:
-            _collector_failed(exc)
+            _collector_failed(exc, stage)
 
     def auto_collect_open_groups() -> None:
         nonlocal collector_running

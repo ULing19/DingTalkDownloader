@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import os
 import subprocess
 import sys
@@ -99,6 +100,78 @@ def terminal_payload(*request_indexes: int, cid: str = CID) -> bytes:
 
 
 class ReplayExtractorTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows native memory layout")
+    def test_process_memory_information_uses_native_pointer_layout(self):
+        pointer_bytes = ctypes.sizeof(ctypes.c_void_p)
+        layout = extractor._MemoryBasicInformation
+        self.assertEqual(ctypes.sizeof(layout), 28 if pointer_bytes == 4 else 48)
+        self.assertEqual(layout.RegionSize.offset, 12 if pointer_bytes == 4 else 24)
+        self.assertEqual(layout.State.offset, 16 if pointer_bytes == 4 else 32)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process memory API")
+    def test_x86_scan_reads_above_two_gib_and_always_closes_handle(self):
+        high_address = 0x80001000
+        payload = b"read-only replay metadata"
+        original_sizeof = ctypes.sizeof
+
+        def x86_pointer_size(value):
+            # Exercise the x86 address limit on both native interpreters while
+            # retaining the real native structure layout for the mock buffer.
+            return 4 if value is ctypes.c_void_p else original_sizeof(value)
+
+        for mode in ("complete", "closed", "read_failure"):
+            with self.subTest(mode=mode):
+                queried_addresses = []
+                read_addresses = []
+                kernel32 = mock.Mock()
+                kernel32.OpenProcess.return_value = 123
+
+                def query_memory(handle, address, info_pointer, buffer_size):
+                    address_value = address.value or 0
+                    queried_addresses.append(address_value)
+                    info = info_pointer._obj
+                    if address_value == 0:
+                        info.BaseAddress = 0
+                        info.RegionSize = high_address
+                        info.State = 0x10000  # MEM_FREE: skip without reading.
+                        info.Protect = 0x0001
+                    elif address_value == high_address:
+                        info.BaseAddress = high_address
+                        info.RegionSize = len(payload)
+                        info.State = 0x1000  # MEM_COMMIT
+                        info.Protect = 0x0004  # PAGE_READWRITE
+                    else:
+                        return 0
+                    return buffer_size
+
+                def read_memory(handle, address, buffer, requested, read_pointer):
+                    read_addresses.append(address.value)
+                    if mode == "read_failure":
+                        raise RuntimeError("synthetic read failure")
+                    ctypes.memmove(buffer, payload, len(payload))
+                    read_pointer._obj.value = len(payload)
+                    return True
+
+                kernel32.VirtualQueryEx.side_effect = query_memory
+                kernel32.ReadProcessMemory.side_effect = read_memory
+                with mock.patch.object(
+                    extractor.ctypes, "WinDLL", return_value=kernel32
+                ), mock.patch.object(extractor.ctypes, "sizeof", x86_pointer_size):
+                    stream = extractor.iter_process_memory_chunks(456)
+                    if mode == "read_failure":
+                        with self.assertRaisesRegex(RuntimeError, "synthetic"):
+                            list(stream)
+                    elif mode == "closed":
+                        self.assertEqual(next(stream), payload)
+                        stream.close()
+                    else:
+                        self.assertEqual(list(stream), [payload])
+
+                self.assertEqual(queried_addresses[:2], [0, high_address])
+                self.assertEqual(read_addresses, [high_address])
+                kernel32.OpenProcess.assert_called_once_with(0x0410, False, 456)
+                kernel32.CloseHandle.assert_called_once_with(123)
+
     def test_new_navigation_log_query_order_and_event_name(self):
         with tempfile.TemporaryDirectory() as root:
             log_path = Path(root) / "cef_debug.log.new"
@@ -979,6 +1052,36 @@ class ReplayExtractorTests(unittest.TestCase):
                     atomic_write_links(output, [url])
             self.assertEqual(output.read_text(encoding="utf-8"), "original\n")
             self.assertEqual(list(Path(root).glob("*.tmp")), [])
+
+    def test_atomic_writer_uses_resolved_parent(self):
+        url = (
+            "https://n.dingtalk.com/dingding/live-room/index.html?"
+            f"roomId=roomOne&liveUuid={UUID_1}"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            alias = Path(root) / "alias"
+            physical = Path(root) / "physical"
+            alias.mkdir()
+            physical.mkdir()
+            physical = physical.resolve()
+            original_resolve = Path.resolve
+
+            def resolve_parent(path, *args, **kwargs):
+                if path == alias:
+                    return physical
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "resolve", resolve_parent), mock.patch(
+                "dingtalk_replay_extractor.os.replace", wraps=os.replace
+            ) as replace_file:
+                atomic_write_links(alias / "链接集.txt", [url, url])
+
+            source, destination = map(Path, replace_file.call_args.args)
+            self.assertEqual(source.parent, physical)
+            self.assertEqual(destination, physical / "链接集.txt")
+            self.assertEqual(destination.read_text(encoding="utf-8"), url + "\n")
+            self.assertFalse((alias / "链接集.txt").exists())
+            self.assertEqual(list(physical.glob("*.tmp")), [])
 
     def test_atomic_writer_rejects_noncanonical_url(self):
         with tempfile.TemporaryDirectory() as root:

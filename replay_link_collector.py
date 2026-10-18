@@ -137,6 +137,12 @@ def list_remembered_groups(settings: Dict[str, object]) -> list[Dict[str, str]]:
 def save_settings(settings: Dict[str, object], path: Optional[Path] = None) -> None:
     settings_path = Path(path) if path is not None else _settings_path()
     settings_path.parent.mkdir(parents=True, exist_ok=True)
+    # Packaged Windows apps may redirect LOCALAPPDATA to another volume.
+    # Resolve the existing parent before creating the temporary file so both
+    # operands of os.replace use the same physical directory (WinError 17).
+    # Do not resolve the final component: replace a destination symlink rather
+    # than following it and overwriting a different file.
+    settings_path = settings_path.parent.resolve(strict=True) / settings_path.name
     temp_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
