@@ -25,6 +25,7 @@ ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN", "")
 CODE_PEPPER = os.environ.get("LICENSE_CODE_PEPPER", "")
 ORDER_ENCRYPTION_KEY = os.environ.get("ORDER_ENCRYPTION_KEY", "")
 XIANYU_ITEM_IDS = tuple(item.strip() for item in os.environ.get("XIANYU_ITEM_IDS", "").split(",") if item.strip())
+QLCHAT_XIANYU_ITEM_IDS = tuple(item.strip() for item in os.environ.get("QLCHAT_XIANYU_ITEM_IDS", "").split(",") if item.strip())
 XIANYU_DB_HOST = os.environ.get("XIANYU_DB_HOST", "127.0.0.1")
 XIANYU_DB_PORT = int(os.environ.get("XIANYU_DB_PORT", "13316"))
 XIANYU_DB_USER = os.environ.get("XIANYU_DB_USER", "")
@@ -36,6 +37,9 @@ MAX_DEVICES_PER_ORDER = 2
 ELIGIBLE_ORDER_STATUSES = frozenset({"pending_ship", "paid", "shipped", "completed"})
 CODE_RE = re.compile(r"^[A-Z0-9-]{12,64}$")
 ID_RE = re.compile(r"^[a-f0-9]{32}$")
+DEFAULT_PRODUCT = "dingtalk"
+PRODUCTS = frozenset({"dingtalk", "qlchat"})
+PRODUCT_NAMES = {"dingtalk": "钉钉下载器", "qlchat": "千聊下载器"}
 app = FastAPI(title="License Service", docs_url=None, redoc_url=None, openapi_url=None)
 _activation_sync_lock = threading.Lock()
 
@@ -48,12 +52,14 @@ class Activation(StrictModel):
     order_id: str = Field(min_length=4, max_length=128)
     code: str = Field(min_length=12, max_length=64)
     device_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    product: str = Field(default=DEFAULT_PRODUCT, pattern=r"^[a-z0-9_-]{1,24}$")
 
 
 class Create(StrictModel):
     order_id: str = Field(min_length=4, max_length=128)
     code: Optional[str] = Field(default=None, min_length=12, max_length=64)
     expires_at: Optional[int] = Field(default=None, gt=0)
+    product: str = Field(default=DEFAULT_PRODUCT, pattern=r"^[a-z0-9_-]{1,24}$")
 
 
 class Update(StrictModel):
@@ -61,11 +67,13 @@ class Update(StrictModel):
     code: Optional[str] = Field(default=None, min_length=12, max_length=64)
     expires_at: Optional[int] = None
     revoked: Optional[bool] = None
+    product: Optional[str] = Field(default=None, pattern=r"^[a-z0-9_-]{1,24}$")
 
 
 class ImportOrders(StrictModel):
     order_ids: list[str] = Field(min_length=1, max_length=5000)
     expires_at: Optional[int] = Field(default=None, gt=0)
+    product: str = Field(default=DEFAULT_PRODUCT, pattern=r"^[a-z0-9_-]{1,24}$")
 
 
 class LicenseQuery(StrictModel):
@@ -110,9 +118,8 @@ def _db():
             id TEXT PRIMARY KEY, order_hash TEXT NOT NULL, order_mask TEXT NOT NULL,
             order_ciphertext TEXT,
             code_hash TEXT NOT NULL UNIQUE, expires_at INTEGER, revoked INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-          CREATE INDEX IF NOT EXISTS license_order_idx ON licenses(order_hash);
-          CREATE UNIQUE INDEX IF NOT EXISTS license_one_per_order_idx ON licenses(order_hash);
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            product TEXT NOT NULL DEFAULT 'dingtalk');
           CREATE TABLE IF NOT EXISTS devices(
             order_hash TEXT NOT NULL, device_id TEXT NOT NULL, first_seen INTEGER NOT NULL,
             last_seen INTEGER NOT NULL, PRIMARY KEY(order_hash,device_id));
@@ -123,6 +130,12 @@ def _db():
         columns = {row[1] for row in db.execute("PRAGMA table_info(licenses)")}
         if "order_ciphertext" not in columns:
             db.execute("ALTER TABLE licenses ADD COLUMN order_ciphertext TEXT")
+        if "product" not in columns:
+            db.execute("ALTER TABLE licenses ADD COLUMN product TEXT NOT NULL DEFAULT 'dingtalk'")
+        db.execute("CREATE INDEX IF NOT EXISTS license_order_idx ON licenses(order_hash)")
+        db.execute("DROP INDEX IF EXISTS license_one_per_order_idx")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS license_one_per_product_order_idx ON licenses(product,order_hash)")
+        db.execute("CREATE INDEX IF NOT EXISTS license_product_idx ON licenses(product)")
         yield db
     finally:
         db.close()
@@ -159,19 +172,57 @@ def _order_code(order_id: str, supplied: Optional[str] = None) -> str:
     return code
 
 
-def _upsert_order(db, order_id: str, now: int, expires_at=None) -> str:
+def _check_product(product: str) -> str:
+    value = str(product or DEFAULT_PRODUCT).strip().lower()
+    if value not in PRODUCTS:
+        raise HTTPException(400, "未知的产品授权类型")
+    return value
+
+
+def _product_order_id(order_id: str, product: str) -> str:
+    value = str(order_id).strip()
+    if product == "qlchat":
+        raw = value[7:] if value.upper().startswith("QLCHAT-") else value
+        return f"QLCHAT-{raw}"
+    return value
+
+
+def _display_order_id(order_id: str, product: str) -> str:
+    value = str(order_id).strip()
+    return value[7:] if product == "qlchat" and value.upper().startswith("QLCHAT-") else value
+
+
+def _validated_order_code(order_id: str, supplied: Optional[str], product: str, status: int = 400) -> str:
+    """Keep the product namespace internal: the customer's order is their code."""
+    canonical = _product_order_id(order_id, product)
+    if supplied is not None and supplied.strip():
+        candidate = _product_order_id(supplied, product)
+        if candidate.upper() != canonical.upper():
+            raise HTTPException(status, "订单号就是兑换码，请填写同一个完整订单号")
+    return _order_code(canonical)
+
+
+def _order_hash(order_id: str, product: str) -> str:
+    value = order_id.strip()
+    if product == DEFAULT_PRODUCT:
+        return _digest(value, b"order-id\0")
+    return _digest(product + "\0" + value, b"order-id\0")
+
+
+def _upsert_order(db, order_id: str, now: int, expires_at=None, product: str = DEFAULT_PRODUCT) -> str:
     """All import paths preserve revocation, expiry, and device bindings."""
-    order_id = order_id.strip()
+    product = _check_product(product)
+    order_id = _product_order_id(order_id, product)
     code_hash = _code_hash(_order_code(order_id))
-    order_hash = _digest(order_id, b"order-id\0")
-    row = db.execute("SELECT id,code_hash FROM licenses WHERE order_hash=?", (order_hash,)).fetchone()
+    order_hash = _order_hash(order_id, product)
+    row = db.execute("SELECT id,code_hash FROM licenses WHERE product=? AND order_hash=?", (product, order_hash)).fetchone()
     if row:
-        db.execute("UPDATE licenses SET order_ciphertext=?,code_hash=?,updated_at=? WHERE id=?",
-                   (_encrypt_order(order_id), code_hash, now, row["id"]))
+        db.execute("UPDATE licenses SET order_ciphertext=?,code_hash=?,product=?,updated_at=? WHERE id=?",
+                   (_encrypt_order(order_id), code_hash, product, now, row["id"]))
         return "repaired" if row["code_hash"] != code_hash else "skipped"
-    db.execute("INSERT INTO licenses(id,order_hash,order_mask,order_ciphertext,code_hash,expires_at,revoked,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO licenses(id,order_hash,order_mask,order_ciphertext,code_hash,expires_at,revoked,created_at,updated_at,product) VALUES(?,?,?,?,?,?,?,?,?,?)",
                (secrets.token_hex(16), order_hash, _mask(order_id), _encrypt_order(order_id),
-                code_hash, expires_at, 0, now, now))
+                code_hash, expires_at, 0, now, now, product))
     return "created"
 
 
@@ -185,7 +236,8 @@ def repair_order_codes() -> dict:
             repairs = []
             for row in rows:
                 order = _decrypt_order(row["order_ciphertext"])
-                if not order or _digest(order, b"order-id\0") != row["order_hash"]:
+                product = row["product"] if "product" in row.keys() else DEFAULT_PRODUCT
+                if not order or _order_hash(order, product) != row["order_hash"]:
                     raise RuntimeError("订单信息缺失或不一致，已取消迁移；请先恢复加密订单数据")
                 expected = _code_hash(_order_code(order))
                 if expected != row["code_hash"]:
@@ -207,14 +259,18 @@ def repair_order_codes() -> dict:
     return {"total": len(rows), "repaired": len(repairs)}
 
 
-def _sync_xianyu_orders() -> dict:
-    if not XIANYU_ITEM_IDS:
-        raise RuntimeError("未配置 XIANYU_ITEM_IDS，拒绝同步以避免误授权其他商品")
+def _sync_xianyu_orders(product: str = DEFAULT_PRODUCT) -> dict:
+    product = _check_product(product)
+    item_ids = XIANYU_ITEM_IDS if product == DEFAULT_PRODUCT else QLCHAT_XIANYU_ITEM_IDS
+    if not item_ids:
+        raise RuntimeError(f"未配置 {product} 商品 ID，拒绝同步以避免误授权其他商品")
+    if set(XIANYU_ITEM_IDS) & set(QLCHAT_XIANYU_ITEM_IDS):
+        raise RuntimeError("两款软件的商品 ID 不能重叠，请先核对商品配置")
     if not XIANYU_DB_USER or not XIANYU_DB_PASSWORD:
         raise RuntimeError("未配置闲鱼数据库只读账号")
     import pymysql
 
-    placeholders = ",".join(["%s"] * len(XIANYU_ITEM_IDS))
+    placeholders = ",".join(["%s"] * len(item_ids))
     query = f"SELECT order_no,status FROM xy_orders WHERE item_id IN ({placeholders})"
     connection = pymysql.connect(
         host=XIANYU_DB_HOST, port=XIANYU_DB_PORT, user=XIANYU_DB_USER,
@@ -223,7 +279,7 @@ def _sync_xianyu_orders() -> dict:
     )
     try:
         with connection.cursor() as cursor:
-            cursor.execute(query, XIANYU_ITEM_IDS)
+            cursor.execute(query, item_ids)
             source_rows = cursor.fetchall()
             order_ids = [str(row[0]).strip() for row in source_rows
                          if row[0] and row[1] in ELIGIBLE_ORDER_STATUSES]
@@ -235,7 +291,7 @@ def _sync_xianyu_orders() -> dict:
         db.execute("BEGIN IMMEDIATE")
         try:
             for order_id in dict.fromkeys(order_ids):
-                counts[_upsert_order(db, order_id, now)] += 1
+                counts[_upsert_order(db, order_id, now, product=product)] += 1
             db.commit()
         except Exception:
             db.rollback()
@@ -245,12 +301,25 @@ def _sync_xianyu_orders() -> dict:
             **counts}
 
 
+def sync_configured_products() -> dict:
+    """Sync only products with an explicit item allowlist."""
+    result = {}
+    for product, item_ids in ((DEFAULT_PRODUCT, XIANYU_ITEM_IDS), ("qlchat", QLCHAT_XIANYU_ITEM_IDS)):
+        if item_ids:
+            try:
+                result[product] = _sync_xianyu_orders(product)
+            except Exception:
+                # One product must not prevent the other product's scheduled sync.
+                result[product] = {"error": "订单同步失败，请检查商品配置和后台连接"}
+    return result
+
+
 def _lookup_license(db, request: Activation):
-    if request.code.strip().upper() != request.order_id.strip().upper():
-        raise HTTPException(403, "请使用订单号作为兑换码")
-    _order_code(request.order_id)
-    return db.execute("SELECT * FROM licenses WHERE order_hash=?",
-                      (_digest(request.order_id, b"order-id\0"),)).fetchone()
+    product = _check_product(request.product)
+    order_id = _product_order_id(request.order_id, product)
+    _validated_order_code(request.order_id, request.code, product, status=403)
+    return db.execute("SELECT * FROM licenses WHERE product=? AND order_hash=?",
+                      (product, _order_hash(order_id, product))).fetchone()
 
 
 def _find_license(db, request: Activation):
@@ -261,7 +330,9 @@ def _find_license(db, request: Activation):
         raise HTTPException(403, "此订单授权已撤销，请联系卖家")
     if row["expires_at"] is not None and row["expires_at"] <= int(time.time()):
         raise HTTPException(403, "兑换码已过期")
-    if not hmac.compare_digest(row["order_hash"], _digest(request.order_id, b"order-id\0")):
+    product = _check_product(request.product)
+    order_id = _product_order_id(request.order_id, product)
+    if not hmac.compare_digest(row["order_hash"], _order_hash(order_id, product)):
         raise HTTPException(403, "订单号与兑换码不匹配")
     return row
 
@@ -273,11 +344,12 @@ def health():
 
 
 @app.post("/admin/sync-orders", dependencies=[Depends(_admin)])
-def sync_orders():
+def sync_orders(product: str = DEFAULT_PRODUCT):
+    product = _check_product(product)
     try:
-        return _sync_xianyu_orders()
-    except Exception as exc:
-        raise HTTPException(503, str(exc)) from None
+        return {**_sync_xianyu_orders(product), "product": product, "product_name": PRODUCT_NAMES[product]}
+    except Exception:
+        raise HTTPException(503, "订单同步失败，请检查商品配置和后台连接") from None
 
 
 @app.post("/v1/activate")
@@ -293,16 +365,16 @@ def activate(request: Activation):
             db.rollback()
             try:
                 with _activation_sync_lock:
-                    _sync_xianyu_orders()
+                    _sync_xianyu_orders(request.product)
             except Exception:
                 pass
             db.execute("BEGIN IMMEDIATE")
         row = _find_license(db, request)
-        if request.code.strip().upper() == request.order_id.strip().upper():
-            db.execute(
-                "UPDATE licenses SET code_hash=?, updated_at=? WHERE id=?",
-                (_digest(request.order_id.upper(), b"license-code\0"), now, row["id"]),
-            )
+        code = _validated_order_code(request.order_id, request.code, _check_product(request.product), status=403)
+        db.execute(
+            "UPDATE licenses SET code_hash=?, updated_at=? WHERE id=?",
+            (_digest(code, b"license-code\0"), now, row["id"]),
+        )
         exists = db.execute("SELECT 1 FROM devices WHERE order_hash=? AND device_id=?",
                             (row["order_hash"], request.device_id)).fetchone()
         if not exists:
@@ -326,11 +398,11 @@ def activate(request: Activation):
 def check(request: Activation):
     with _db() as db:
         row = _find_license(db, request)
-        if request.code.strip().upper() == request.order_id.strip().upper():
-            db.execute(
-                "UPDATE licenses SET code_hash=?, updated_at=? WHERE id=?",
-                (_digest(request.order_id.upper(), b"license-code\0"), int(time.time()), row["id"]),
-            )
+        code = _validated_order_code(request.order_id, request.code, _check_product(request.product), status=403)
+        db.execute(
+            "UPDATE licenses SET code_hash=?, updated_at=? WHERE id=?",
+            (_digest(code, b"license-code\0"), int(time.time()), row["id"]),
+        )
         exists = db.execute("SELECT 1 FROM devices WHERE order_hash=? AND device_id=?",
                             (row["order_hash"], request.device_id)).fetchone()
         if not exists:
@@ -349,22 +421,24 @@ def admin_page():
 
 
 @app.get("/admin/licenses", dependencies=[Depends(_admin)])
-def list_licenses(q: str = "", page: int = 1, page_size: int = 15):
+def list_licenses(q: str = "", page: int = 1, page_size: int = 15, product: Optional[str] = None):
     q = q.strip()
+    product_filter = _check_product(product) if product else None
     page = max(1, page)
     page_size = min(50, max(1, page_size))
     with _db() as db:
-        rows = db.execute("""SELECT l.id,l.order_mask,l.order_ciphertext,l.expires_at,l.revoked,l.created_at,
+        rows = db.execute("""SELECT l.id,l.order_mask,l.order_ciphertext,l.expires_at,l.revoked,l.created_at,l.product,
           (SELECT COUNT(*) FROM devices d WHERE d.order_hash=l.order_hash) device_count
-          FROM licenses l ORDER BY l.created_at DESC LIMIT 1000""").fetchall()
+          FROM licenses l WHERE (? IS NULL OR l.product=?) ORDER BY l.created_at DESC""", (product_filter, product_filter)).fetchall()
     items = []
     for row in rows:
-        order_id = _decrypt_order(row["order_ciphertext"])
+        order_id = _display_order_id(_decrypt_order(row["order_ciphertext"]), row["product"])
         if q and q.casefold() not in order_id.casefold() and q.casefold() not in row["order_mask"].casefold():
             continue
         item = dict(row)
         item.pop("order_ciphertext", None)
         item["order_id"] = order_id or row["order_mask"]
+        item["product_name"] = PRODUCT_NAMES.get(row["product"], row["product"])
         items.append(item)
     total = len(items)
     start = (page - 1) * page_size
@@ -373,16 +447,18 @@ def list_licenses(q: str = "", page: int = 1, page_size: int = 15):
 
 @app.post("/admin/licenses", dependencies=[Depends(_admin)])
 def create_license(request: Create):
-    code = _order_code(request.order_id, request.code)
+    product = _check_product(request.product)
+    order_id = _product_order_id(request.order_id, product)
+    code = _validated_order_code(request.order_id, request.code, product)
     now, license_id = int(time.time()), secrets.token_hex(16)
-    order_hash = _digest(request.order_id, b"order-id\0")
+    order_hash = _order_hash(order_id, product)
     with _db() as db:
         try:
-            db.execute("INSERT INTO licenses(id,order_hash,order_mask,order_ciphertext,code_hash,expires_at,revoked,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                       (license_id, order_hash, _mask(request.order_id), _encrypt_order(request.order_id), _code_hash(code), request.expires_at, 0, now, now))
+            db.execute("INSERT INTO licenses(id,order_hash,order_mask,order_ciphertext,code_hash,expires_at,revoked,created_at,updated_at,product) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (license_id, order_hash, _mask(order_id), _encrypt_order(order_id), _code_hash(code), request.expires_at, 0, now, now, product))
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该订单已存在兑换码")
-    return {"id": license_id, "order_mask": _mask(request.order_id), "code": code, "expires_at": request.expires_at}
+    return {"id": license_id, "order_mask": _mask(_display_order_id(order_id, product)), "code": _display_order_id(code, product), "expires_at": request.expires_at, "product": product, "product_name": PRODUCT_NAMES[product]}
 
 
 @app.post("/admin/licenses/import-orders", dependencies=[Depends(_admin)])
@@ -391,7 +467,7 @@ def import_orders(request: ImportOrders):
     normalized = []
     seen = set()
     for raw in request.order_ids:
-        order_id = str(raw).strip()
+        order_id = _product_order_id(str(raw).strip(), _check_product(request.product))
         if not order_id or order_id in seen:
             continue
         _order_code(order_id)
@@ -403,7 +479,7 @@ def import_orders(request: ImportOrders):
         db.execute("BEGIN IMMEDIATE")
         try:
             for order_id in normalized:
-                counts[_upsert_order(db, order_id, now, request.expires_at)] += 1
+                counts[_upsert_order(db, order_id, now, request.expires_at, request.product)] += 1
             db.commit()
         except Exception:
             db.rollback()
@@ -415,36 +491,41 @@ def import_orders(request: ImportOrders):
 def update_license(license_id: str, request: Update):
     if not ID_RE.fullmatch(license_id):
         raise HTTPException(404, "兑换码记录不存在")
-    changes, values = [], []
-    if request.order_id is not None:
-        code = _order_code(request.order_id, request.code)
-        changes += ["order_hash=?", "order_mask=?", "order_ciphertext=?", "code_hash=?"]
-        values += [_digest(request.order_id, b"order-id\0"), _mask(request.order_id),
-                   _encrypt_order(request.order_id), _code_hash(code)]
-    if "expires_at" in request.model_fields_set:
-        if request.expires_at is not None and request.expires_at <= 0:
-            raise HTTPException(400, "过期时间必须是 Unix 时间戳")
-        changes.append("expires_at=?"); values.append(request.expires_at)
-    if request.revoked is not None:
-        changes.append("revoked=?"); values.append(int(request.revoked))
-    if not changes and request.code is None:
-        raise HTTPException(400, "没有可更新的字段")
-    changes.append("updated_at=?"); values += [int(time.time()), license_id]
     with _db() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            old = db.execute("SELECT order_hash,order_ciphertext FROM licenses WHERE id=?", (license_id,)).fetchone()
+            old = db.execute("SELECT order_hash,order_ciphertext,product FROM licenses WHERE id=?", (license_id,)).fetchone()
             if old is None:
                 raise HTTPException(404, "兑换码记录不存在")
+            product = old["product"]
+            if request.product is not None and _check_product(request.product) != product:
+                raise HTTPException(400, "已有授权所属软件不能修改，请为另一软件单独创建订单授权")
+            changes, values = [], []
+            new_hash = None
+            if request.order_id is not None:
+                order_id = _product_order_id(request.order_id, product)
+                code = _validated_order_code(request.order_id, request.code, product)
+                new_hash = _order_hash(order_id, product)
+                changes += ["order_hash=?", "order_mask=?", "order_ciphertext=?", "code_hash=?"]
+                values += [new_hash, _mask(_display_order_id(order_id, product)), _encrypt_order(order_id), _code_hash(code)]
+            if "expires_at" in request.model_fields_set:
+                if request.expires_at is not None and request.expires_at <= 0:
+                    raise HTTPException(400, "过期时间必须是 Unix 时间戳")
+                changes.append("expires_at=?"); values.append(request.expires_at)
+            if request.revoked is not None:
+                changes.append("revoked=?"); values.append(int(request.revoked))
             if request.code is not None and request.order_id is None:
-                code = _order_code(_decrypt_order(old["order_ciphertext"]), request.code)
-                db.execute("UPDATE licenses SET code_hash=? WHERE id=?", (_code_hash(code), license_id))
+                code = _validated_order_code(_decrypt_order(old["order_ciphertext"]), request.code, product)
+                changes.append("code_hash=?"); values.append(_code_hash(code))
+            if not changes:
+                raise HTTPException(400, "没有可更新的字段")
+            changes.append("updated_at=?"); values += [int(time.time()), license_id]
             cursor = db.execute(f"UPDATE licenses SET {','.join(changes)} WHERE id=?", values)
             if cursor.rowcount != 1:
                 raise HTTPException(404, "兑换码记录不存在")
-            if request.order_id is not None:
+            if new_hash is not None:
                 db.execute("UPDATE devices SET order_hash=? WHERE order_hash=?",
-                           (_digest(request.order_id, b"order-id\0"), old["order_hash"]))
+                           (new_hash, old["order_hash"]))
             db.commit()
         except HTTPException:
             db.rollback()
@@ -452,8 +533,10 @@ def update_license(license_id: str, request: Update):
         except sqlite3.IntegrityError:
             db.rollback()
             raise HTTPException(409, "订单号或兑换码已被其他授权记录使用")
-        row = db.execute("SELECT id,order_mask,expires_at,revoked FROM licenses WHERE id=?", (license_id,)).fetchone()
-    return dict(row)
+        row = db.execute("SELECT id,order_mask,expires_at,revoked,product FROM licenses WHERE id=?", (license_id,)).fetchone()
+    result = dict(row)
+    result["product_name"] = PRODUCT_NAMES[result["product"]]
+    return result
 
 
 @app.delete("/admin/licenses/{license_id}", dependencies=[Depends(_admin)])
@@ -493,22 +576,4 @@ def reset_devices(license_id: str):
     return {"reset": True}
 
 
-ADMIN_HTML_V2 = r'''<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>授权管理</title>
-<style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b1120;color:#e5e7eb;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.wrap{max-width:1180px;margin:0 auto;padding:28px 20px}.hero{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:22px}.hero h1{margin:0;font-size:28px}.muted{color:#94a3b8}.panel{background:#111b2e;border:1px solid #263652;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 8px 24px #0002}.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.grow{flex:1;min-width:240px}input,button{border:1px solid #3b4d6b;border-radius:8px;padding:9px 11px;background:#0f172a;color:#e5e7eb}button{cursor:pointer;background:#2563eb;border-color:#2563eb}button.secondary{background:#25324a;border-color:#3b4d6b}button.danger{background:#b42318;border-color:#b42318}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:900px}th,td{padding:11px 10px;border-bottom:1px solid #263652;text-align:left;vertical-align:middle}th{color:#93c5fd;font-weight:600;background:#111b2e;position:sticky;top:0}.order{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#14532d;color:#bbf7d0}.badge.off{background:#4c1d1d;color:#fecaca}.actions{display:flex;gap:5px;flex-wrap:wrap}.actions button{padding:6px 8px;font-size:12px}.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px}.hidden{display:none}pre{white-space:pre-wrap;background:#0b1220;border-radius:8px;padding:10px;color:#a7f3d0}
-</style></head><body><main class="wrap">
-<section class="hero"><div><h1>下载器授权管理</h1><div class="muted">订单授权、设备绑定与兑换码管理</div></div><div class="muted" id="summary">未登录</div></section>
-<section class="panel"><div class="row"><input class="grow" id="token" type="password" autocomplete="off" placeholder="管理员令牌"><button id="login">鉴权并加载</button><button class="secondary" id="sync">立即同步订单</button></div><div class="muted">令牌只保存在当前页面内存，不写入浏览器存储。</div></section>
-<section class="panel"><h2>新增订单授权</h2><p class="muted">订单号就是兑换码，不生成随机码。客户在软件中输入完整订单号即可激活，最多绑定两台设备。</p><div class="row"><input class="grow" id="order" placeholder="闲鱼订单号（同时作为兑换码）"><input id="expiry" type="datetime-local"><button id="create">创建</button></div><pre id="newcode" class="hidden"></pre></section>
-<section class="panel"><div class="toolbar"><input class="grow" id="search" placeholder="搜索完整订单号"><button class="secondary" id="searchBtn">搜索</button><button class="secondary" id="clearBtn">清除</button><label class="muted">每页 15 条</label></div><div class="table-wrap"><table><thead><tr><th>订单号</th><th>设备</th><th>状态</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><div class="pager"><span class="muted" id="pageInfo"></span><div><button class="secondary" id="prev">上一页</button><button class="secondary" id="next">下一页</button></div></div></section>
-</main><script>
-let auth='',page=1,pages=1;const $=id=>document.getElementById(id), headers=()=>({'Authorization':'Bearer '+auth,'Content-Type':'application/json'}), esc=s=>{const e=document.createElement('span');e.textContent=s??'';return e.innerHTML};
-function err(d){return d?.detail||'请求失败'}
-async function load(){const q=$('search').value.trim();const r=await fetch('/admin/licenses?q='+encodeURIComponent(q)+'&page='+page+'&page_size=15',{headers:headers()});if(!r.ok){alert(await r.text());return}const d=await r.json();pages=d.pages;$('summary').textContent=`共 ${d.total} 条授权`;$('pageInfo').textContent=`第 ${d.page}/${d.pages} 页`;$('prev').disabled=page<=1;$('next').disabled=page>=pages;$('rows').innerHTML=d.items.map(x=>`<tr><td class="order">${esc(x.order_id)}</td><td>${x.device_count}/2</td><td><span class="badge ${x.revoked?'off':''}">${x.revoked?'已撤销':'有效'}</span></td><td>${x.expires_at?new Date(x.expires_at*1000).toLocaleString():'长期'}</td><td class="actions"><button data-action="toggle" data-id="${esc(x.id)}" data-revoked="${!x.revoked}">${x.revoked?'恢复':'撤销'}</button><button class="secondary" data-action="reset" data-id="${esc(x.id)}">重置设备</button><button class="danger" data-action="delete" data-id="${esc(x.id)}">删除</button></td></tr>`).join('')}
-async function request(path,method='POST',body){const r=await fetch(path,{method,headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(err(d));return d}
-$('login').onclick=()=>{auth=$('token').value.trim();page=1;load()};$('searchBtn').onclick=()=>{page=1;load()};$('clearBtn').onclick=()=>{$('search').value='';page=1;load()};$('search').onkeydown=e=>{if(e.key==='Enter')$('searchBtn').click()};$('prev').onclick=()=>{if(page>1){page--;load()}};$('next').onclick=()=>{if(page<pages){page++;load()}};
-$('sync').onclick=async()=>{try{const d=await request('/admin/sync-orders');alert(`同步完成：来源 ${d.source_count}，新增 ${d.created}，修复 ${d.repaired||0}`);page=1;load()}catch(e){alert(e.message)}};
-$('create').onclick=async()=>{try{const raw=$('expiry').value;const d=await request('/admin/licenses','POST',{order_id:$('order').value.trim(),expires_at:raw?Math.floor(new Date(raw).getTime()/1000):null});$('newcode').classList.remove('hidden');$('newcode').textContent='订单号 / 兑换码： '+d.code;page=1;load()}catch(e){alert(e.message)}};
-$('rows').onclick=async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const id=b.dataset.id;try{if(b.dataset.action==='toggle')await request('/admin/licenses/'+id,'PATCH',{revoked:b.dataset.revoked==='true'});if(b.dataset.action==='reset'&&confirm('清除此订单全部设备绑定？'))await request('/admin/licenses/'+id+'/reset-devices');if(b.dataset.action==='delete'&&confirm('永久删除授权记录及绑定？'))await request('/admin/licenses/'+id,'DELETE');load()}catch(err){alert(err.message)}};
-</script></body></html>'''
+ADMIN_HTML_V2 = Path(__file__).with_name('admin.html').read_text(encoding='utf-8')
