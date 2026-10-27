@@ -34,19 +34,21 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from dingtalk_live_share import LiveShareError, LiveShareMedia, fetch_complete_playlist, is_live_share_url
+from dingtalk_docs import normalize_document_url
 
 
 KIND_LIVE = "live"
 KIND_LIVE_SHARE = "live_share"
 KIND_SHANJI = "shanji"
 KIND_YUNPAN = "yunpan"
+KIND_ALIDOCS = "alidocs"
 KIND_UNKNOWN = "unknown"
 
 _LIVE_LABEL = "群直播回放"
 _SHANJI_LABEL = "钉钉闪记"
 _YUNPAN_LABEL = "钉盘/群文件"
 _UNKNOWN_LABEL = "未知链接"
-_USER_AGENT = "DingTalkDownloader/1.3.16 (+https://github.com/ULing19/DingTalkDownloader)"
+_USER_AGENT = "DingTalkDownloader/1.3.26 (+https://github.com/ULing19/DingTalkDownloader)"
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 _URL_RE = re.compile(r"https?://", re.I)
@@ -250,12 +252,31 @@ def _query_first(query: Mapping[str, Sequence[str]], name: str) -> str:
     return ""
 
 
+def _yunpan_ids(query: Mapping[str, Sequence[str]]) -> Tuple[str, str]:
+    """Accept preview aliases only when every supplied value agrees."""
+    result = []
+    for names in ({"spaceid", "cloudspacespaceid"}, {"fileid", "cloudspacedentryid", "dentryid"}):
+        values = {str(v).strip() for key, items in query.items()
+                  if key.lower() in names for v in items}
+        if len(values) != 1:
+            return "", ""
+        value = values.pop()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", value):
+            return "", ""
+        result.append(value)
+    return result[0], result[1]
+
+
 def _is_yunpan(parsed: Any, query: Mapping[str, Sequence[str]]) -> bool:
     host = (parsed.hostname or "").lower().rstrip(".")
     path = (parsed.path or "").lower().rstrip("/")
     route = _query_first(query, "route").lower()
-    space_id = _query_first(query, "spaceId")
-    file_id = _query_first(query, "fileId")
+    try:
+        if parsed.username or parsed.password or parsed.port not in (None, 80, 443):
+            return False
+    except ValueError:
+        return False
+    space_id, file_id = _yunpan_ids(query)
     if not space_id or not file_id:
         return False
     # 手机/桌面深链以及浏览器重定向后的 download 页面都保留这些参数。
@@ -265,23 +286,37 @@ def _is_yunpan(parsed: Any, query: Mapping[str, Sequence[str]]) -> bool:
         "/page/yunpan",
     }
     alidocs_shape = host == "alidocs.dingtalk.com"
+    # The browser's original-file preview already carries the same CSpace
+    # IDs as QR links, but has no route=previewDentry parameter.
+    if alidocs_shape and path == "/uni-preview":
+        return True
     return route == "previewdentry" and (qr_shape or browser_shape or alidocs_shape)
 
 
 def _normalize_yunpan(parsed: Any, query: Mapping[str, Sequence[str]]) -> str:
-    # MediaGo 的钉盘解析器按 alidocs 域名和 previewDentry 参数识别，统一成
-    # 最小且稳定的查询串，避免把来源页面的追踪参数传给解析器。
+    # QR and alidocs previews share the CSpace parser. Preserve the preview's
+    # UUID/version/context: reducing it to only spaceId/fileId can change the
+    # lookup and fail to resolve an otherwise accessible original file.
+    space_id, file_id = _yunpan_ids(query)
+    preview = (parsed.hostname or "").lower().rstrip(".") == "alidocs.dingtalk.com" and (parsed.path or "").lower().rstrip("/") == "/uni-preview"
     values = [
-        ("route", _query_first(query, "route") or "previewDentry"),
-        ("spaceId", _query_first(query, "spaceId")),
-        ("fileId", _query_first(query, "fileId")),
+        ("route", "previewDentry"),
+        ("spaceId", space_id),
+        ("fileId", file_id),
         ("type", _query_first(query, "type") or "file"),
     ]
-    return urlunparse(("https", "alidocs.dingtalk.com", "/", "", urlencode(values), ""))
+    for name in ("dentryUuid", "version", "scene", "operate", "extension", "bizType",
+                 "fileType", "fileSize", "previewAtta", "corpId", "orgId", "fileName"):
+        value = _query_first(query, name)
+        if name == "scene" and preview and not value:
+            value = "universalSpace"
+        if value and len(value) <= 240 and not _CONTROL_RE.search(value):
+            values.append((name, value))
+    return urlunparse(("https", "alidocs.dingtalk.com", "/uni-preview" if preview else "/", "", urlencode(values), ""))
 
 
 def classify_dingtalk_url(url: str) -> UrlInfo:
-    """识别钉钉群回放、闪记和钉盘深链。
+    """识别群回放、闪记、钉盘深链、原文件预览与文档节点。
 
     不符合已知格式的输入返回 ``unknown``，而不是猜造 ``roomId/liveUuid``。
     """
@@ -312,6 +347,10 @@ def classify_dingtalk_url(url: str) -> UrlInfo:
 
     if _is_yunpan(parsed, query):
         return UrlInfo(KIND_YUNPAN, _YUNPAN_LABEL, _normalize_yunpan(parsed, query))
+
+    document_url = normalize_document_url(raw)
+    if document_url:
+        return UrlInfo(KIND_ALIDOCS, "钉钉文档", document_url)
 
     if is_live_share_url(raw):
         # Room-only shares need official password verification before resolving
@@ -1356,6 +1395,7 @@ def download_resolved(
 __all__ = [
     "AVTimeline",
     "KIND_LIVE",
+    "KIND_ALIDOCS",
     "KIND_LIVE_SHARE",
     "KIND_SHANJI",
     "KIND_UNKNOWN",

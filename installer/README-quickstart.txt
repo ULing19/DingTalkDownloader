@@ -5,7 +5,7 @@ MediaGo: https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0
 
 1. 双击 DingTalkDownloader.exe
 2. 首次运行点击“重新登录”并完成钉钉授权；程序优先自动使用 Windows 自带的 Edge，不要求安装 Google Chrome；请等待软件确认会话已保存
-3. 粘贴群回放、闪记或群文件链接
+3. 粘贴群回放、闪记、QR/钉盘群文件或 alidocs 文件预览链接
 4. 选择保存目录并点击“开始下载”
 
 也可以在钉钉登录并保持一个或多个目标群“直播广场”打开，然后点击“一键获取已打开群回放”。
@@ -18,3 +18,8 @@ MediaGo: https://github.com/Sophomoresty/mediago/releases/tag/v0.3.0
 若任务提示音视频轨结束时间异常，文件仍会保留；请先用原链接重试。
 中文完整说明: 使用说明.txt
 采集功能说明: 回放链接一键获取说明.txt
+文档与原文件说明: DOCUMENT_LINKS.md
+
+alidocs.dingtalk.com/uni-preview 文件预览会按 QR/群文件流程下载原文件。
+若浏览器可预览而软件提示无权限，请通过软件“重新登录”并用有权访问文件的同一账号授权。
+/i/nodes/… 在线文档节点解析仍为实验功能；原文件未取得时，已读取的文字会另存 .txt，并明确提示非原始文件。

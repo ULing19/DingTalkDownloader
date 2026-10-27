@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DingTalkDownloader release version: 1.3.25
+# DingTalkDownloader release version: 1.3.26
 import os
 
 from PyInstaller.utils.hooks import collect_all
@@ -13,6 +13,7 @@ hiddenimports = [
     'cv2',
     'dingtalk_rpc',
     'license_client',
+    'dingtalk_docs',
     'websocket',
     'websocket._abnf',
     'websocket._core',

@@ -1,5 +1,5 @@
 ================================================================================
-                         钉钉回放下载器 1.3.9
+                         钉钉回放下载器 1.3.26
                               使用说明
 ================================================================================
 
@@ -7,7 +7,7 @@
 --------------------------------------------------------------------------------
 本工具为 Windows 图形界面程序，用于整理和下载你有权限访问的钉钉媒体内容。
 它组合使用 MediaGo 与 GoDingtalk 两个开源命令行引擎，并使用 FFmpeg 合并视频。
-群回放优先保留完整 HLS 时间轴，GoDingtalk 仅在主链路不可用时兼容回退。
+群回放优先由 GoDingtalk 获取完整回放源，MediaGo 用作兼容回退，并保留 HLS 时间轴。
 
 项目开源地址：
   https://github.com/ULing19/DingTalkDownloader
@@ -32,6 +32,16 @@
 【群文件/钉盘视频】
   https://qr.dingtalk.com/page/yunpan?route=previewDentry&spaceId=<空间ID>&fileId=<文件ID>&type=file
   其中 spaceId 和 fileId 是云盘对象标识，不能改写成 roomId/liveUuid。
+
+【alidocs 原文件预览】
+  https://alidocs.dingtalk.com/uni-preview?spaceId=<空间ID>&fileId=<文件ID>&extension=xlsx
+  与 QR/群文件共用下载流程，保留文件 UUID、版本号等已知参数，下载 Excel、Word、PDF 等原文件。
+  浏览器可以预览但下载器无权限时，请点软件“重新登录”，使用有权访问文件的同一账号授权。
+
+【钉钉文档节点（实验功能）】
+  https://alidocs.dingtalk.com/i/nodes/<节点ID>
+  软件会打开独立文档登录窗口，尝试提取原文件；在线文字文档的文字结果会另存 .txt，
+  并明确标注非原始文件。在线表格、画布等类型尚未完整验证，详细说明见 DOCUMENT_LINKS.md。
 
 群文件视频会走播放流；普通 PDF、Office、图片或压缩包在解析器返回直接下载地址时，
 会按 MIME、文件名或 URL 扩展名原样保存，不经过 FFmpeg。只有预览地址、文件夹、

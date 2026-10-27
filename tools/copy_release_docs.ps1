@@ -42,3 +42,8 @@ $sharingGuide = Join-Path $SourceDir 'docs\password-sharing.md'
 if (Test-Path -LiteralPath $sharingGuide -PathType Leaf) {
     Copy-Item -LiteralPath $sharingGuide -Destination (Join-Path $DestinationDir 'PASSWORD_SHARE_BETA.md') -Force
 }
+
+$documentGuide = Join-Path $SourceDir 'docs\document-nodes.md'
+if (Test-Path -LiteralPath $documentGuide -PathType Leaf) {
+    Copy-Item -LiteralPath $documentGuide -Destination (Join-Path $DestinationDir 'DOCUMENT_LINKS.md') -Force
+}

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from typing import Optional
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 import dingtalk_media as media
 
@@ -243,6 +246,88 @@ class DingtalkMediaTests(unittest.TestCase):
         )
         self.assertEqual(live.kind, media.KIND_LIVE)
         self.assertEqual(media.classify_dingtalk_url("https://example.com/?roomId=r&liveUuid=u").kind, media.KIND_UNKNOWN)
+
+    def test_alidocs_uni_preview_uses_qr_backend_and_keeps_file_context(self):
+        url = ("https://alidocs.dingtalk.com/uni-preview?extension=xlsx&bizType=document"
+               "&cloudSpaceDentryId=99&previewAtta=2&cloudSpaceSpaceId=42&version=1"
+               "&scene=universalSpace&mainsiteOrigin=mainsite&spaceId=42&fileSize=14370"
+               "&dentryUuid=ExampleNode123456&fileId=99&utm_source=not-needed#preview")
+        info = media.classify_dingtalk_url(url)
+        self.assertEqual(info.kind, media.KIND_YUNPAN)
+        parsed = urlparse(info.normalized_url)
+        self.assertEqual((parsed.scheme, parsed.netloc, parsed.path),
+                         ("https", "alidocs.dingtalk.com", "/uni-preview"))
+        query = parse_qs(parsed.query)
+        self.assertEqual(query, {"route": ["previewDentry"], "spaceId": ["42"], "fileId": ["99"],
+                                "type": ["file"], "dentryUuid": ["ExampleNode123456"], "version": ["1"],
+                                "scene": ["universalSpace"], "extension": ["xlsx"], "bizType": ["document"],
+                                "fileSize": ["14370"], "previewAtta": ["2"]})
+        self.assertEqual(media.classify_dingtalk_url(info.normalized_url), info)
+
+    def test_uni_preview_aliases_work_without_optional_uuid_or_route(self):
+        for fields in ("spaceId=42&fileId=99", "cloudSpaceSpaceId=42&cloudSpaceDentryId=99",
+                       "SPACEID=42&FILEID=99", "spaceId=42&spaceId=42&fileId=99"):
+            with self.subTest(fields=fields):
+                info = media.classify_dingtalk_url("https://alidocs.dingtalk.com/uni-preview?" + fields)
+                self.assertEqual(info.kind, media.KIND_YUNPAN)
+                query = parse_qs(urlparse(info.normalized_url).query)
+                self.assertEqual(query["spaceId"], ["42"])
+                self.assertEqual(query["fileId"], ["99"])
+                self.assertEqual(query["scene"], ["universalSpace"])
+
+    def test_uni_preview_rejects_conflicting_ids_invalid_urls_and_missing_ids(self):
+        base = "https://alidocs.dingtalk.com/uni-preview?"
+        for url in (base + "spaceId=42&fileId=99&cloudSpaceDentryId=100",
+                    base + "spaceId=42&fileId=99&spaceId=43",
+                    base + "spaceId=42", base + "spaceId=42&fileId=",
+                    base + "spaceId=42&fileId=../file",
+                    base.replace("dingtalk.com", "dingtalk.com.evil.test") + "spaceId=42&fileId=99",
+                    base.replace("https://", "https://user:secret@") + "spaceId=42&fileId=99",
+                    base.replace(".com/", ".com:9000/") + "spaceId=42&fileId=99"):
+            with self.subTest(url=url):
+                self.assertEqual(media.classify_dingtalk_url(url).kind, media.KIND_UNKNOWN)
+
+    def test_qr_preserves_known_preview_metadata_too(self):
+        info = media.classify_dingtalk_url("https://qr.dingtalk.com/page/yunpan?route=previewDentry"
+                                          "&spaceId=42&fileId=99&dentryUuid=ExampleNode123456&version=2")
+        query = parse_qs(urlparse(info.normalized_url).query)
+        self.assertEqual(query["dentryUuid"], ["ExampleNode123456"])
+        self.assertEqual(query["version"], ["2"])
+
+    def test_uni_preview_downloads_xlsx_bytes_via_existing_group_file_pipeline(self):
+        # The parser's CDN URL may have no filename; original MIME/title must
+        # retain xlsx bytes instead of sending this file through FFmpeg.
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+            archive.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>')
+        original = buffer.getvalue()
+        payload = {"title": "示例表格.xlsx", "streams": {"default": {
+            "format": "binary", "urls": ["https://cdn.example.test/download?id=original"]}}}
+        response = _FakeResponse([original[:50], original[50:]], {
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Content-Length": str(len(original))})
+        url = "https://alidocs.dingtalk.com/uni-preview?spaceId=42&fileId=99&dentryUuid=ExampleNode123456&version=3&extension=xlsx"
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            engine, ffmpeg = root_path / "mediago.exe", root_path / "ffmpeg.exe"
+            engine.touch()
+            ffmpeg.touch()
+            with mock.patch.object(media, "_run_mediago", return_value=payload) as parse, \
+                 mock.patch.object(media, "urlopen", return_value=response), \
+                 mock.patch.object(media, "_run_ffmpeg", side_effect=AssertionError("original files must not be converted")):
+                title, output = media.download_resolved(url, media.KIND_YUNPAN, engine, ffmpeg,
+                                                        {"account": "local-test-only"}, root_path / "out")
+            self.assertEqual(title, "示例表格.xlsx")
+            self.assertEqual(output.name, "示例表格.xlsx")
+            self.assertEqual(output.read_bytes(), original)
+            with zipfile.ZipFile(output) as archive:
+                self.assertIsNone(archive.testzip())
+                self.assertIn("xl/workbook.xml", archive.namelist())
+            sent_query = parse_qs(urlparse(parse.call_args.args[1]).query)
+            self.assertEqual(sent_query["dentryUuid"], ["ExampleNode123456"])
+            self.assertEqual(sent_query["version"], ["3"])
+            self.assertFalse(parse.call_args.args[2].exists())  # temporary cookie file cleaned
 
     def test_cookie_context_is_temporary_and_rejects_control_values(self):
         with tempfile.TemporaryDirectory() as root:

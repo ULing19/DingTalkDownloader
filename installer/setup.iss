@@ -13,7 +13,7 @@
 #endif
 #define MyAppNameEn "DingTalkDownloader"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.25"
+  #define MyAppVersion "1.3.26"
 #endif
 #define MyAppPublisher "DingTalkDownloader"
 #define MyAppExeName "DingTalkDownloader.exe"
@@ -90,6 +90,7 @@ Source: "{#ReleaseDir}\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\回放链接一键获取说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#ReleaseDir}\PASSWORD_SHARE_BETA.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ReleaseDir}\DOCUMENT_LINKS.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#ReleaseDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\ZBAR-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -117,7 +118,7 @@ Filename: "{app}\使用说明.txt"; Description: "打开使用说明"; Flags: po
 
 [UninstallDelete]
 ; 仅删除空目录。用户视频、Cookies 和其他运行时文件始终不参与卸载删除。
-Type: filesandordirs; Name: "{localappdata}\DingTalkReplayLinkCollector"
+Type: dirifempty; Name: "{localappdata}\DingTalkReplayLinkCollector"
 Type: dirifempty; Name: "{app}\video"
 Type: dirifempty; Name: "{app}\.goDingtalkConfig"
 Type: dirifempty; Name: "{app}"

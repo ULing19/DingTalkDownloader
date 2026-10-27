@@ -32,6 +32,7 @@ from browser_support import (
     login_browser_from_path,
 )
 from dingtalk_media import (
+    KIND_ALIDOCS,
     KIND_LIVE,
     KIND_LIVE_SHARE,
     KIND_SHANJI,
@@ -45,6 +46,7 @@ from dingtalk_media import (
     media_av_sync_warning,
     safe_output_stem,
 )
+from dingtalk_docs import DocumentBrowser, DocumentError, save_document_text
 from dingtalk_live_share import (
     LiveShareCancelled, LiveShareError, resolve_live_share, validate_viewing_password,
 )
@@ -243,6 +245,7 @@ TITLE_RE = re.compile(r"标题:\s*(.+)")
 HANDLE_RE = re.compile(r"\[(\d+)\]\s*处理\s*URL:\s*(.+)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 TASK_KIND_LABELS = {
+    KIND_ALIDOCS: "文档",
     KIND_LIVE: "群回放",
     KIND_LIVE_SHARE: "直播分享",
     KIND_SHANJI: "闪记",
@@ -429,6 +432,8 @@ def decode_qr_images(paths: List[Path]) -> List[str]:
 
 
 def url_short_label(url: str) -> str:
+    if classify_dingtalk_url(url).kind == KIND_ALIDOCS:
+        return "钉钉文档（开始后读取标题，原文件优先）"
     if classify_dingtalk_url(url).kind == KIND_LIVE_SHARE:
         return "直播分享（开始下载时验证）"
     try:
@@ -944,6 +949,8 @@ class DownloadWorker(threading.Thread):
         # CSpace/QR links. Running several qr.dingtalk.com jobs through the
         # parser at once can make earlier jobs fail while the last succeeds.
         self._yunpan_media_lock = threading.Lock()
+        self._docs_lock = threading.Lock()
+        self._docs_reader: Optional[DocumentBrowser] = None
 
     def emit(self, kind: str, **payload):
         self.event_q.put({"kind": kind, **payload})
@@ -978,6 +985,14 @@ class DownloadWorker(threading.Thread):
                 self._current_process = next(iter(self._active_processes), None)
 
     def run(self):
+        try:
+            self._run_downloads()
+        finally:
+            reader = getattr(self, "_docs_reader", None)
+            if reader is not None:
+                reader.close()
+
+    def _run_downloads(self):
         self.save_dir.mkdir(parents=True, exist_ok=True)
         # Keep the original list positions so GUI progress events still update
         # the correct row when the user selects a non-contiguous subset.
@@ -1135,6 +1150,9 @@ class DownloadWorker(threading.Thread):
         return "群内名称核对失败，已保留已有标题；可重新采集群链接后重试"
 
     def _run_one(self, index: int, task: TaskItem):
+        if task.kind == KIND_ALIDOCS:
+            ok, title, message = self._run_alidocs(index, task)
+            return ok, title, message, ok and bool(message)
         if task.kind == KIND_UNKNOWN:
             return False, "", "无法识别链接类型，请确认链接完整", False
 
@@ -1254,7 +1272,47 @@ class DownloadWorker(threading.Thread):
         except Exception:
             return False, "", "分享回放下载失败，请检查网络后重试"
 
-    def _run_mediago(self, index: int, task: TaskItem):
+    def _run_alidocs(self, index: int, task: TaskItem):
+        try:
+            with self._docs_lock:
+                if self._docs_reader is None:
+                    browser = find_login_browser(self.login_browser_path)
+                    if browser is None:
+                        return False, "", "文档解析需要已安装 Microsoft Edge 或 Chrome，请通过软件打开浏览器登录"
+                    self._docs_reader = DocumentBrowser(browser)
+                reader = self._docs_reader
+            result = reader.read(task.url, self.stop_event,
+                lambda status, progress, message: self.emit(
+                    "task_update", index=index, status=status, progress=progress, message=message))
+            if self.stop_event.is_set():
+                return False, "", "已取消"
+            if result.file_url:
+                # Exactly the same backend used by qr.dingtalk.com previews;
+                # it preserves the original file's name, MIME, and extension.
+                resolved = make_task_item(result.file_url, task.index, task.group_name)
+                self.emit("task_update", index=index, message="已提取钉盘文件标识，开始获取原文件")
+                original = self._run_mediago(index, resolved, session_cookies=result.session_cookies, original_document=True)
+                if original[0] or not result.text:
+                    return original
+                if self.stop_event.is_set():
+                    return False, "", "已取消"
+                # Text is an explicitly requested fallback, never renamed as
+                # an original office/PDF file or reported as an original file.
+                self.emit("task_update", index=index, message="原文件未能取得，保存已读取的正文文本")
+            self.emit("task_update", index=index, title=result.title, message="已读取在线文档正文")
+            with self._output_lock:
+                output = save_document_text(result, self.save_dir)
+            self._apply_group_name(output, task, result.title)
+            message = "已保存正文文本（非原始文件）；此节点未能取得原文件"
+            if result.warning:
+                message += "；" + result.warning
+            return True, result.title, message
+        except DocumentError as exc:
+            return False, "", str(exc)
+        except Exception:
+            return False, "", "文档提取失败，请确认浏览器内能打开此链接后重试"
+
+    def _run_mediago(self, index: int, task: TaskItem, *, session_cookies=None, original_document: bool = False):
         if self.mediago is None or not self.mediago.is_file():
             return False, "", "未找到 MediaGo 解析器"
         if self.ffmpeg is None or not self.ffmpeg.is_file():
@@ -1277,7 +1335,8 @@ class DownloadWorker(threading.Thread):
         # QR/钉盘 links are short-lived previews. Serialize only this parser
         # and retry transient parser/network failures so multiple QR tasks do
         # not collapse into the last successful task.
-        attempts = 3 if task.kind == KIND_YUNPAN else 1
+        attempts = 3 if task.kind == KIND_YUNPAN and not original_document else 1
+        cookie_source = session_cookies if session_cookies is not None else (self.cookies if self.cookies.exists() else None)
         retry_markers = (
             "网络连接失败",
             "媒体解析超时",
@@ -1294,7 +1353,7 @@ class DownloadWorker(threading.Thread):
                             kind=task.kind,
                             mediago=self.mediago,
                             ffmpeg=self.ffmpeg,
-                            cookies_json=self.cookies if self.cookies.exists() else None,
+                            cookies_json=cookie_source,
                             save_dir=self.save_dir,
                             stop_event=self.stop_event,
                             progress_cb=progress_callback,
@@ -1305,7 +1364,7 @@ class DownloadWorker(threading.Thread):
                         kind=task.kind,
                         mediago=self.mediago,
                         ffmpeg=self.ffmpeg,
-                        cookies_json=self.cookies if self.cookies.exists() else None,
+                        cookies_json=cookie_source,
                         save_dir=self.save_dir,
                         stop_event=self.stop_event,
                         progress_cb=progress_callback,
@@ -1817,7 +1876,7 @@ def build_gui():
 
     hint = ctk.CTkLabel(
         left,
-        text="支持群回放、直播分享短链、闪记和群文件；观看密码在下载时按需输入。",
+        text="支持群回放、直播分享、闪记、群文件和钉钉文档；alidocs 文件预览按群文件下载。",
         text_color="gray70",
         font=ctk.CTkFont(size=12),
         wraplength=360,
@@ -2977,7 +3036,7 @@ def build_gui():
             messagebox.showerror(
                 "不支持的链接",
                 f"有 {unknown_count} 条链接无法识别。\n"
-                "目前支持群回放、直播分享短链、钉钉闪记和钉盘/群文件链接。",
+                "目前支持群回放、直播分享短链、钉钉闪记、QR/钉盘群文件、alidocs 文件预览和文档节点链接。",
             )
             return
 
@@ -3036,7 +3095,7 @@ def build_gui():
             log("授权成功，本机已绑定闲鱼订单。")
 
         session_status = validate_dingtalk_session(COOKIES_FILE)
-        public_shares_only = all(task.kind == KIND_LIVE_SHARE for task in selected_tasks)
+        public_shares_only = all(task.kind in {KIND_LIVE_SHARE, KIND_ALIDOCS} for task in selected_tasks)
         if not session_status.valid and not public_shares_only:
             if not godingtalk_ready:
                 messagebox.showerror(
@@ -3323,7 +3382,7 @@ def build_gui():
     collector_btn.configure(command=auto_collect_open_groups)
 
     # 启动时预填：若剪贴板/常用目录有 链接.txt 不自动导入，只提示
-    log("就绪。支持群回放、钉钉闪记和钉盘/群文件链接。")
+    log("就绪。支持群回放、钉钉闪记、钉盘/群文件和钉钉文档链接。")
     log(
         f"一键获取会自动识别已加载群直播页，按群名称保存 {LINK_FILE_NAME}；"
         "不会依赖已记忆群映射。"
@@ -3359,6 +3418,106 @@ def build_gui():
     app.mainloop()
 
 
+def verify_file_download(job_file: str) -> int:
+    """Run one real file task from the packaged EXE, without GUI automation.
+
+    This diagnostic uses the normal license gate, saved DingTalk session,
+    DownloadWorker, parser and downloader. It never activates a new order or
+    clears/replaces existing credentials. The report contains no URL/cookies.
+    """
+    import json
+    import zipfile
+    import license_client
+
+    try:
+        job = json.loads(Path(job_file).read_text(encoding="utf-8-sig"))
+        if not isinstance(job, dict) or set(job) != {"url", "save_dir", "report"}:
+            return 2
+        if not all(isinstance(job[key], str) and job[key].strip() for key in job):
+            return 2
+        save_dir, report_path = Path(job["save_dir"]), Path(job["report"])
+        if not save_dir.is_absolute() or not report_path.is_absolute() or report_path.exists():
+            return 2
+        task = make_task_item(job["url"], 0)
+        if task.kind != KIND_YUNPAN:
+            return 2
+    except (OSError, ValueError, TypeError):
+        return 2
+
+    report = {
+        "application": "DingTalkDownloader",
+        "version": CURRENT_VERSION,
+        "build_feature": "alidocs-original-files",
+        "tested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "task_kind": task.kind,
+        "success": False,
+        "stage": "authorization",
+        "files": [],
+    }
+    try:
+        authorized, detail = license_client.authorize()
+        if not authorized:
+            report["message"] = detail
+            return 1
+        report["authorization"] = "accepted"
+        report["stage"] = "session"
+        session = validate_dingtalk_session(COOKIES_FILE)
+        if not session.valid:
+            report["message"] = session.reason
+            return 1
+        status, detail = _probe_saved_session(COOKIES_FILE)
+        if status != "accepted":
+            report["message"] = detail
+            return 1
+        report["session"] = "accepted"
+        report["stage"] = "engines"
+        mediago, ffmpeg = find_mediago(APP_DIR), find_ffmpeg()
+        if mediago is None or ffmpeg is None:
+            report["message"] = "缺少 MediaGo 或 FFmpeg"
+            return 1
+        report["stage"] = "download"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        before = {p.name for p in save_dir.iterdir()}
+        events = queue.Queue()
+        download_worker = DownloadWorker(find_godingtalk(), mediago, ffmpeg, [task], save_dir,
+                                         COOKIES_FILE, 1, events, threading.Event(), video_workers=1)
+        download_worker.run()
+        done = 0
+        while not events.empty():
+            event = events.get_nowait()
+            if event.get("kind") == "task_update" and event.get("message"):
+                report["message"] = event["message"]
+            if event.get("kind") == "finished":
+                done = event.get("done", 0)
+        for path in save_dir.iterdir():
+            if path.name in before or not path.is_file() or path.name.endswith(".part"):
+                continue
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            result = {"name": path.name, "bytes": path.stat().st_size, "sha256": digest}
+            if path.suffix.lower() in {".xlsx", ".docx", ".pptx"}:
+                try:
+                    with zipfile.ZipFile(path) as archive:
+                        expected = {".xlsx": "xl/workbook.xml", ".docx": "word/document.xml",
+                                    ".pptx": "ppt/presentation.xml"}[path.suffix.lower()]
+                        result["office_container_valid"] = expected in archive.namelist() and archive.testzip() is None
+                except (OSError, ValueError, zipfile.BadZipFile):
+                    result["office_container_valid"] = False
+            report["files"].append(result)
+        report["success"] = bool(done == 1 and report["files"] and all(
+            item["bytes"] > 0 and item.get("office_container_valid", True) for item in report["files"]))
+        report["stage"] = "complete" if report["success"] else "download"
+        return 0 if report["success"] else 1
+    except Exception as exc:
+        # An error's string can include a URL, Cookie, or local account path.
+        report["message"] = "实测过程失败：" + type(exc).__name__
+        return 1
+    finally:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("x", encoding="utf-8-sig") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+
+
 def main():
     # 确保工作目录在程序旁，便于相对路径
     os.chdir(APP_DIR)
@@ -3370,6 +3529,10 @@ def main():
         print("钉钉下载器已在运行。", file=sys.stderr)
         raise SystemExit(2)
     try:
+        if "--verify-file-download" in sys.argv:
+            if len(sys.argv) != 3 or sys.argv[1] != "--verify-file-download":
+                raise SystemExit(2)
+            raise SystemExit(verify_file_download(sys.argv[2]))
         try:
             import customtkinter  # noqa: F401
             import cv2  # noqa: F401

@@ -9,24 +9,37 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.25/DingTalkDownloader_1.3.25_Setup.exe">下载 64 位安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.25/DingTalkDownloader_1.3.25_Portable.zip">下载 64 位绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.25/DingTalkDownloader_1.3.25_x86_Setup.exe">32 位实验安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_x86_Setup.exe">32 位实验安装版</a>
+  ·
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_x86_Portable.zip">32 位实验绿色版</a>
   ·
   <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
   ·
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-**当前版本：1.3.25**　|　QQ群：**1103756143**　|　[全部版本与 32 位绿色版](https://github.com/ULing19/DingTalkDownloader/releases)
+**当前版本：1.3.26**　|　QQ群：**1103756143**　|　[全部版本](https://github.com/ULing19/DingTalkDownloader/releases)
 
 > 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
 
 ## 项目介绍
 
 本项目把钉钉内容整理、链接解析、下载和文件检查放在一个图形界面中。支持单条链接，也支持导入多条任务；群回放、闪记、群文件/钉盘会按链接类型交给对应引擎处理。
+
+### 1.3.26 钉钉文档与原文件兼容
+
+- `alidocs.dingtalk.com/uni-preview` 文件预览链接现在与 `qr.dingtalk.com` 群文件共用下载流程，直接下载 Excel、Word、PDF 等原文件；保留文件名和原始扩展名，不转换成视频。
+- 支持 `spaceId/fileId` 及 `cloudSpaceSpaceId/cloudSpaceDentryId` 别名，保留文件 UUID、版本号和预览场景；同一链接的文件标识相互冲突时拒绝解析，避免取错文件。
+- 已用 64 位软件实际下载一份 Excel 文件，大小与链接中的 14,370 字节一致，XLSX 内部结构和 CRC 校验通过。
+- 浏览器能打开文件，但下载器提示无权限时，请点击软件里的“重新登录”，用拥有该文件权限的同一账号授权。浏览器登录与软件登录相互独立。
+- 新增 `/i/nodes/…` 文档节点解析（实验功能），尝试提取原文件标识；在线文字文档可滚动读取正文，原文件未取得时另存明确标注的 `.txt` 并提示“需检查”。在线表格、画布和所有文档类型的原件输出尚未完整验证。
+- 沿用原来的解析和下载按钮。64 位、32 位均提供安装包与绿色版；正常覆盖升级保留订单授权、登录态和下载结果。32 位仍为实验版。
+
+详细步骤和验证范围见 [钉钉文档与原文件使用说明](docs/document-nodes.md)。
 
 ### 1.3.25 采集保存兼容修复
 
@@ -288,13 +301,13 @@
 
 ### 方式一：安装版（推荐）
 
-从 [v1.3.25 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.25) 下载 `DingTalkDownloader_1.3.25_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
+从 [v1.3.26 Releases](https://github.com/ULing19/DingTalkDownloader/releases/tag/v1.3.26) 下载 `DingTalkDownloader_1.3.26_Setup.exe`，按安装向导完成安装。向导可以创建桌面快捷方式和开始菜单项，安装后可从 Windows 设置、开始菜单卸载项或安装目录中的卸载程序移除软件。
 
-卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。卸载时会删除 `%LOCALAPPDATA%\DingTalkReplayLinkCollector` 中的标题映射和保存目录缓存。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
+卸载程序会保留安装目录中的 `video\` 和旧版 `.goDingtalkConfig\`，以免误删下载结果；新版登录会话保存在 `%LOCALAPPDATA%\DingTalkDownloader\.goDingtalkConfig\`，卸载或覆盖安装不会清除。标题映射和保存目录缓存也会保留，便于重新安装后继续使用。Windows SmartScreen 可能显示“未知发布者”，请只从本仓库 Release 下载，并按发布页核对 SHA-256。
 
 ### 方式二：绿色版
 
-同一 Release 提供 `DingTalkDownloader_1.3.25_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
+同一 Release 提供 `DingTalkDownloader_1.3.26_Portable.zip`。解压到任意位置后双击 `DingTalkDownloader.exe` 即可使用，不写入系统安装项。以下运行时文件必须与主程序保持同一目录：
 
 ```text
 DingTalkDownloader.exe
@@ -456,4 +469,4 @@ GoDingtalk、MediaGo、FFmpeg 及其他依赖分别遵循各自许可证。请�
 - 只下载你有权访问的回放或文件，并自行确认组织授权、内容版权和平台规则。
 - 项目作者不提供账号代登录、不索取密码或 Cookie，也不保证平台接口长期稳定。
 
-当前 GUI/安装包版本：`1.3.25`。
+当前 GUI/安装包版本：`1.3.26`。
