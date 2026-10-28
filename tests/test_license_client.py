@@ -1,4 +1,5 @@
 import os
+import ssl
 import sys
 import time
 import unittest
@@ -48,8 +49,25 @@ class LicenseClientStorageTests(unittest.TestCase):
         opener.open.return_value = response
         with mock.patch.object(license_client.urllib.request, "build_opener", return_value=opener) as build:
             license_client._request("/v1/check", {"x": "y"})
-        handlers = list(build.call_args.args)
+        handlers = list(build.call_args_list[0].args)
         self.assertTrue(any(isinstance(item, license_client.urllib.request.ProxyHandler) for item in handlers))
+
+    def test_request_falls_back_to_system_proxy_after_tls_error(self):
+        direct = mock.Mock()
+        proxy = mock.Mock()
+        direct.open.side_effect = urllib.error.URLError(
+            ssl.SSLCertVerificationError(20, "unable to get local issuer certificate")
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"authorized":true}'
+        proxy.open.return_value = response
+        with mock.patch.object(
+            license_client.urllib.request, "build_opener", side_effect=[direct, proxy]
+        ) as build, mock.patch.object(license_client, "NETWORK_RETRY_DELAYS_SECONDS", (0,)):
+            self.assertEqual(license_client._request("/v1/check", {"x": "y"}), {"authorized": True})
+        self.assertEqual(direct.open.call_count, 1)
+        self.assertEqual(proxy.open.call_count, 1)
+        self.assertEqual(build.call_count, 2)
 
     def test_temporary_server_error_uses_offline_fallback(self):
         opener = mock.Mock()

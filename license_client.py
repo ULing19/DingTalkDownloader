@@ -7,6 +7,8 @@ import hashlib
 import hmac
 import json
 import os
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +23,7 @@ PRODUCT_ENTROPY = b"DingTalkDownloader-license-v1"
 OFFLINE_GRACE_SECONDS = 30 * 24 * 60 * 60
 ONLINE_RECHECK_INTERVAL_SECONDS = 24 * 60 * 60
 NETWORK_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.5)
+SYSTEM_PROXY_RETRY_DELAYS_SECONDS = (0.0,)
 
 
 class LicenseError(RuntimeError):
@@ -101,41 +104,63 @@ def _request(route: str, body: dict) -> dict:
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             raise LicenseError("授权服务器拒绝了不安全跳转。")
 
-    # Authorization must work on domestic machines even when a stale local
-    # proxy (for example 127.0.0.1:7890) is configured. Bypass environment
-    # proxy variables for this HTTPS endpoint and connect directly.
-    opener = urllib.request.build_opener(
+    # Prefer a direct connection so stale proxy settings do not break access.
+    # If the local Python trust path or network cannot reach the service, retry
+    # through Windows/Python's configured system proxy. Both paths use the
+    # same HTTPS URL, certificate validation, and redirect rejection.
+    direct_opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _NoRedirect(),
     )
+    openers = [(direct_opener, NETWORK_RETRY_DELAYS_SECONDS)]
+    # ProxyHandler() discovers configured environment/Windows proxy settings;
+    # it does not disable TLS verification and cannot change the destination.
+    openers.append((urllib.request.build_opener(_NoRedirect()), SYSTEM_PROXY_RETRY_DELAYS_SECONDS))
     last_error: Optional[Exception] = None
-    for delay in NETWORK_RETRY_DELAYS_SECONDS:
-        if delay:
-            time.sleep(delay)
-        try:
-            with opener.open(request, timeout=15) as response:
-                payload = json.loads(response.read(32_768).decode("utf-8"))
-                if not isinstance(payload, dict) or payload.get("authorized") is not True:
-                    raise LicenseError("授权服务器返回了无效结果。")
-                return payload
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 or 500 <= exc.code <= 599:
+    for opener_index, (opener, delays) in enumerate(openers):
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            try:
+                with opener.open(request, timeout=15) as response:
+                    payload = json.loads(response.read(32_768).decode("utf-8"))
+                    if not isinstance(payload, dict) or payload.get("authorized") is not True:
+                        raise LicenseError("授权服务器返回了无效结果。")
+                    return payload
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 or 500 <= exc.code <= 599:
+                    last_error = exc
+                    continue
+                try:
+                    payload = json.loads(exc.read(8192).decode("utf-8"))
+                    detail = payload.get("detail", "授权校验失败")
+                except Exception:
+                    detail = "授权校验失败"
+                raise LicenseRejectedError(str(detail)) from None
+            except LicenseError:
+                raise
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                 last_error = exc
                 continue
-            try:
-                payload = json.loads(exc.read(8192).decode("utf-8"))
-                detail = payload.get("detail", "授权校验失败")
-            except Exception:
-                detail = "授权校验失败"
-            raise LicenseRejectedError(str(detail)) from None
-        except LicenseError:
-            raise
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            last_error = exc
-            continue
+        # A server response means the endpoint was reached; do not hide an
+        # HTTP outage behind an unrelated proxy. Network/TLS failures may use
+        # the configured system proxy on the next pass.
+        if isinstance(last_error, urllib.error.HTTPError):
+            break
     if isinstance(last_error, ValueError):
         raise LicenseNetworkError("授权服务器返回了无效响应，请稍后重试。") from None
-    raise LicenseNetworkError("无法连接授权服务器，请检查网络后重试。") from None
+    if isinstance(last_error, urllib.error.HTTPError):
+        raise LicenseNetworkError("授权服务器暂时不可用，请稍后重试。") from None
+    reason = getattr(last_error, "reason", last_error)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        detail = "TLS证书校验失败，请检查系统证书链或安全软件。"
+    elif isinstance(reason, socket.gaierror):
+        detail = "DNS解析失败，请检查网络后重试。"
+    elif isinstance(reason, (TimeoutError, socket.timeout)):
+        detail = "连接授权服务器超时，请检查网络后重试。"
+    else:
+        detail = "无法连接授权服务器，请检查网络后重试。"
+    raise LicenseNetworkError(detail) from None
 
 
 def _load() -> Optional[dict]:
