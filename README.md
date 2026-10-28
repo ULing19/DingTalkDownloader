@@ -9,20 +9,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_Setup.exe">下载 64 位安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_Portable.zip">下载 64 位绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_x86_Setup.exe">32 位实验安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_x86_Setup.exe">32 位实验安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.26/DingTalkDownloader_1.3.26_x86_Portable.zip">32 位实验绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_x86_Portable.zip">32 位实验绿色版</a>
   ·
   <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
   ·
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-**当前版本：1.3.26**　|　QQ群：**1103756143**　|　[全部版本](https://github.com/ULing19/DingTalkDownloader/releases)
+**当前版本：1.3.27**　|　QQ群：**1103756143**　|　[全部版本](https://github.com/ULing19/DingTalkDownloader/releases)
 
 > 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
 
