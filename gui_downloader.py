@@ -156,6 +156,16 @@ def _authorize_download_client() -> Tuple[bool, str]:
         return False, "授权校验发生错误，请稍后重试。"
 
 
+def _activate_download_client(order_id: str) -> Tuple[bool, str]:
+    try:
+        import license_client
+
+        authorized, detail = license_client.activate(order_id)
+        return bool(authorized), str(detail or "授权激活失败")
+    except Exception:
+        return False, "授权激活发生错误，请稍后重试。"
+
+
 def _acquire_single_instance(
     name: str = r"Local\ULing19.DingTalkDownloader",
 ) -> bool:
@@ -3131,18 +3141,46 @@ def build_gui():
                             log("已取消授权输入，下载未启动。")
                             refresh_action_states()
                             return
-                        import license_client
+                        license_check_running = True
+                        refresh_action_states()
+                        start_btn.configure(text="正在激活…")
+                        log("正在连接授权服务器激活，请稍候…")
 
-                        authorized, license_detail = license_client.activate(order_id)
-                        if not authorized:
-                            messagebox.showerror("授权失败", license_detail)
-                            log(f"授权失败：{license_detail}")
+                        def activate_worker() -> None:
+                            activation_result = _activate_download_client(order_id)
+
+                            def finish_activation() -> None:
+                                nonlocal license_check_running
+                                license_check_running = False
+                                start_btn.configure(text="开始下载")
+                                refresh_action_states()
+                                activated, detail = activation_result
+                                if not activated:
+                                    messagebox.showerror("授权失败", detail)
+                                    log(f"授权失败：{detail}")
+                                    return
+                                messagebox.showinfo(
+                                    "授权成功", "本机已绑定此订单授权，可以开始下载。"
+                                )
+                                log("授权成功，本机已绑定闲鱼订单。")
+                                start_download(
+                                    session_checked=session_checked,
+                                    license_checked=True,
+                                )
+
+                            schedule_ui(finish_activation)
+
+                        try:
+                            threading.Thread(
+                                target=activate_worker, name="license-activation", daemon=True
+                            ).start()
+                        except RuntimeError:
+                            license_check_running = False
+                            start_btn.configure(text="开始下载")
                             refresh_action_states()
-                            return
-                        messagebox.showinfo(
-                            "授权成功", "本机已绑定此订单授权，可以开始下载。"
-                        )
-                        log("授权成功，本机已绑定闲鱼订单。")
+                            log("无法启动授权激活，请重试。")
+                            messagebox.showerror("授权失败", "无法启动授权激活，请重试。")
+                        return
                     else:
                         log(f"下载授权校验通过：{license_detail}")
                     start_download(

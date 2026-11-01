@@ -55,19 +55,46 @@ class LicenseClientStorageTests(unittest.TestCase):
     def test_request_falls_back_to_system_proxy_after_tls_error(self):
         direct = mock.Mock()
         proxy = mock.Mock()
+        origin = mock.Mock()
         direct.open.side_effect = urllib.error.URLError(
             ssl.SSLCertVerificationError(20, "unable to get local issuer certificate")
         )
+        origin.open.side_effect = urllib.error.URLError(TimeoutError())
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = b'{"authorized":true}'
         proxy.open.return_value = response
         with mock.patch.object(
-            license_client.urllib.request, "build_opener", side_effect=[direct, proxy]
+            license_client.urllib.request, "build_opener", side_effect=[direct, origin, proxy]
         ) as build, mock.patch.object(license_client, "NETWORK_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(license_client._request("/v1/check", {"x": "y"}), {"authorized": True})
         self.assertEqual(direct.open.call_count, 1)
         self.assertEqual(proxy.open.call_count, 1)
-        self.assertEqual(build.call_count, 2)
+        self.assertEqual(build.call_count, 3)
+
+    def test_origin_fallback_preserves_hostname_and_sends_after_network_failure(self):
+        direct, proxy, origin = mock.Mock(), mock.Mock(), mock.Mock()
+        direct.open.side_effect = urllib.error.URLError(TimeoutError())
+        proxy.open.side_effect = urllib.error.URLError(TimeoutError())
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"authorized":true}'
+        origin.open.return_value = response
+        with mock.patch.object(license_client.urllib.request, "build_opener", side_effect=[direct, origin, proxy]), \
+             mock.patch.object(license_client, "NETWORK_RETRY_DELAYS_SECONDS", (0,)):
+            self.assertEqual(license_client._request("/v1/check", {}), {"authorized": True})
+        self.assertEqual(origin.open.call_args.args[0].full_url, "https://license.uling19.com/v1/check")
+        proxy.open.assert_not_called()
+        with self.assertRaises(ValueError):
+            license_client._OriginHTTPSConnection("other.example")
+
+    def test_origin_connection_uses_ip_but_keeps_tls_hostname(self):
+        connection = license_client._OriginHTTPSConnection("license.uling19.com")
+        with mock.patch.object(license_client.socket, "create_connection", return_value=mock.sentinel.socket) as connect:
+            self.assertIs(connection._create_connection((connection.host, 443), 3), mock.sentinel.socket)
+        connect.assert_called_once_with((license_client.LICENSE_ORIGIN_IP, 443), 3, None)
+        self.assertEqual(connection.host, "license.uling19.com")
+        handler = license_client._OriginHTTPSHandler()
+        self.assertEqual(handler._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(handler._context.check_hostname)
 
     def test_temporary_server_error_uses_offline_fallback(self):
         opener = mock.Mock()

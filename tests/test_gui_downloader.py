@@ -16,6 +16,15 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_activate_download_client_handles_success_and_private_errors(self):
+        import license_client
+
+        with mock.patch.object(license_client, "activate", return_value=(True, "激活成功")) as activate:
+            self.assertEqual(gui._activate_download_client("test-order"), (True, "激活成功"))
+            activate.assert_called_once_with("test-order")
+        with mock.patch.object(license_client, "activate", side_effect=OSError("private order")):
+            self.assertEqual(gui._activate_download_client("test-order"), (False, "授权激活发生错误，请稍后重试。"))
+
     def test_authorize_download_client_returns_license_result(self):
         import license_client
 

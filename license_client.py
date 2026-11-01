@@ -5,6 +5,7 @@ import base64
 import ctypes
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import socket
@@ -19,10 +20,12 @@ from typing import Optional
 # HTTPS certificate validation stays enabled. Deployment must provision a
 # certificate whose SAN covers this address, or replace it with the service host.
 LICENSE_API = "https://license.uling19.com"
+# Fallback address for the same service. TLS still validates the hostname.
+LICENSE_ORIGIN_IP = "103.212.186.19"
 PRODUCT_ENTROPY = b"DingTalkDownloader-license-v1"
 OFFLINE_GRACE_SECONDS = 30 * 24 * 60 * 60
 ONLINE_RECHECK_INTERVAL_SECONDS = 24 * 60 * 60
-NETWORK_RETRY_DELAYS_SECONDS = (0.0, 1.0, 2.5)
+NETWORK_RETRY_DELAYS_SECONDS = (0.0,)
 SYSTEM_PROXY_RETRY_DELAYS_SECONDS = (0.0,)
 
 
@@ -36,6 +39,25 @@ class LicenseNetworkError(LicenseError):
 
 class LicenseRejectedError(LicenseError):
     """The server explicitly rejected the order, device, or license."""
+
+
+class _OriginHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to the origin while keeping the original TLS server name."""
+
+    def __init__(self, host, **kwargs):
+        if host != "license.uling19.com":
+            raise ValueError("Unexpected authorization host")
+        super().__init__(host, **kwargs)
+
+        def connect_origin(_address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+            return socket.create_connection((LICENSE_ORIGIN_IP, 443), timeout, source_address)
+
+        self._create_connection = connect_origin
+
+
+class _OriginHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(_OriginHTTPSConnection, request, context=self._context)
 
 
 class _Blob(ctypes.Structure):
@@ -105,16 +127,16 @@ def _request(route: str, body: dict) -> dict:
             raise LicenseError("授权服务器拒绝了不安全跳转。")
 
     # Prefer a direct connection so stale proxy settings do not break access.
-    # If the local Python trust path or network cannot reach the service, retry
-    # through Windows/Python's configured system proxy. Both paths use the
-    # same HTTPS URL, certificate validation, and redirect rejection.
+    # If direct access fails, try the same hostname at the origin, then the
+    # configured system proxy. Every route validates TLS and rejects redirects.
     direct_opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _NoRedirect(),
     )
     openers = [(direct_opener, NETWORK_RETRY_DELAYS_SECONDS)]
-    # ProxyHandler() discovers configured environment/Windows proxy settings;
-    # it does not disable TLS verification and cannot change the destination.
+    openers.append((urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                               _OriginHTTPSHandler(), _NoRedirect()), (0.0,)))
+    # ProxyHandler() discovers configured environment/Windows proxy settings.
     openers.append((urllib.request.build_opener(_NoRedirect()), SYSTEM_PROXY_RETRY_DELAYS_SECONDS))
     last_error: Optional[Exception] = None
     for opener_index, (opener, delays) in enumerate(openers):
@@ -144,7 +166,7 @@ def _request(route: str, body: dict) -> dict:
                 continue
         # A server response means the endpoint was reached; do not hide an
         # HTTP outage behind an unrelated proxy. Network/TLS failures may use
-        # the configured system proxy on the next pass.
+        # the configured system proxy or same-host origin on the next pass.
         if isinstance(last_error, urllib.error.HTTPError):
             break
     if isinstance(last_error, ValueError):
