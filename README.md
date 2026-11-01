@@ -9,26 +9,34 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_Setup.exe">下载 64 位安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.28/DingTalkDownloader_1.3.28_Setup.exe">下载 64 位安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_Portable.zip">下载 64 位绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.28/DingTalkDownloader_1.3.28_Portable.zip">下载 64 位绿色版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_x86_Setup.exe">32 位实验安装版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.28/DingTalkDownloader_1.3.28_x86_Setup.exe">32 位实验安装版</a>
   ·
-  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.27/DingTalkDownloader_1.3.27_x86_Portable.zip">32 位实验绿色版</a>
+  <a href="https://github.com/ULing19/DingTalkDownloader/releases/download/v1.3.28/DingTalkDownloader_1.3.28_x86_Portable.zip">32 位实验绿色版</a>
   ·
   <a href="https://m.tb.cn/h.8FqsHCP?tk=wj9xTlzLKNU">闲鱼店铺</a>
   ·
   <a href="https://github.com/ULing19/DingTalkDownloader/issues">问题反馈</a>
 </p>
 
-**当前版本：1.3.27**　|　QQ群：**1103756143**　|　[全部版本](https://github.com/ULing19/DingTalkDownloader/releases)
+**当前版本：1.3.28**　|　QQ群：**1103756143**　|　[全部版本](https://github.com/ULing19/DingTalkDownloader/releases)
 
 > 公开发行版均需要有效的闲鱼订单号授权后才能下载；一个订单最多绑定两台设备。旧版无授权发行包已从 Releases 撤下，请使用当前版本。
 
 ## 项目介绍
 
 本项目把钉钉内容整理、链接解析、下载和文件检查放在一个图形界面中。支持单条链接，也支持导入多条任务；群回放、闪记、群文件/钉盘会按链接类型交给对应引擎处理。
+
+### 1.3.28 下载启动无响应修复
+
+- 授权联网校验改在后台执行，点击“开始下载”后立即显示“授权校验中”，窗口不会因 DNS、TLS 或边缘节点超时而卡住。
+- 钉钉会话校验成功后直接继续下载，不再重复执行一次授权联网校验。
+- 保存目录不可写、磁盘空间不足或后台任务无法启动时，显示具体错误并恢复按钮状态。
+- 单个界面回调异常不会再中断整个事件队列；日志会记录启动失败阶段，便于远程排查。
+- 保留 1.3.27 的 `license.uling19.com` 直连与系统代理回退策略，升级保留订单授权、钉钉登录状态和已有视频。
 
 ### 1.3.26 钉钉文档与原文件兼容
 

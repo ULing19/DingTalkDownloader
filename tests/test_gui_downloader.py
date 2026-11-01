@@ -16,6 +16,24 @@ import gui_downloader as gui
 
 
 class GuiDownloaderTests(unittest.TestCase):
+    def test_authorize_download_client_returns_license_result(self):
+        import license_client
+
+        with mock.patch.object(
+            license_client, "authorize", return_value=(True, "授权有效")
+        ):
+            self.assertEqual(gui._authorize_download_client(), (True, "授权有效"))
+
+    def test_authorize_download_client_sanitizes_unexpected_error(self):
+        import license_client
+
+        with mock.patch.object(
+            license_client, "authorize", side_effect=OSError("private path")
+        ):
+            result = gui._authorize_download_client()
+        self.assertEqual(result, (False, "授权校验发生错误，请稍后重试。"))
+        self.assertNotIn("private", result[1])
+
     def test_collection_storage_errors_include_stage_and_codes_not_private_data(self):
         error = OSError(errno.EXDEV, "private URL and group", "private-settings.json")
         error.winerror = 17

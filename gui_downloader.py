@@ -144,6 +144,18 @@ def _collection_io_error_message(error: OSError, stage: str) -> str:
     return f"{stage}失败：{reason}{suffix}"
 
 
+def _authorize_download_client() -> Tuple[bool, str]:
+    """Run the potentially slow license request without leaking raw errors."""
+
+    try:
+        import license_client
+
+        authorized, detail = license_client.authorize()
+        return bool(authorized), str(detail or "授权校验失败")
+    except Exception:
+        return False, "授权校验发生错误，请稍后重试。"
+
+
 def _acquire_single_instance(
     name: str = r"Local\ULing19.DingTalkDownloader",
 ) -> bool:
@@ -1762,6 +1774,7 @@ def build_gui():
     worker: Optional[DownloadWorker] = None
     collector_running = False
     login_running = False
+    license_check_running = False
     session_check_running = False
     update_running = False
     qr_running = False
@@ -2247,6 +2260,7 @@ def build_gui():
             state.running
             or collector_running
             or login_running
+            or license_check_running
             or session_check_running
             or update_running
         )
@@ -2961,8 +2975,8 @@ def build_gui():
             daemon=True,
         ).start()
 
-    def start_download(*, session_checked: bool = False):
-        nonlocal worker, session_check_running
+    def start_download(*, session_checked: bool = False, license_checked: bool = False):
+        nonlocal worker, license_check_running, session_check_running
         if state.running:
             return
         if qr_running:
@@ -2970,6 +2984,9 @@ def build_gui():
             return
         if login_running:
             messagebox.showinfo("正在登录", "请先在软件唤起的浏览器中完成授权。")
+            return
+        if license_check_running:
+            log("正在校验下载授权，请稍候…")
             return
         if update_running:
             messagebox.showwarning("正在检查更新", "请等待更新检查或下载完成后再开始任务。")
@@ -3064,35 +3081,83 @@ def build_gui():
             )
             return
 
-        # License checks happen before the DingTalk session flow so an expired
-        # entitlement cannot trigger an unrelated login prompt. Code/order data
-        # are encrypted with the current Windows user's DPAPI profile.
-        import license_client
+        # DNS/TLS or a regional edge can delay authorization for tens of
+        # seconds. Keep that request off the Tk thread so Start responds
+        # immediately and the window remains usable while it is checked.
+        if not license_checked:
+            license_check_running = True
+            refresh_action_states()
+            start_btn.configure(text="授权校验中…")
+            log("正在校验下载授权，界面可继续响应…")
 
-        authorized, license_detail = license_client.authorize()
-        if not authorized:
-            if license_detail.startswith("无法连接授权服务器"):
-                messagebox.showerror("授权服务器不可用", license_detail)
-                log("授权服务器暂不可用，下载未启动。")
-                return
-            if license_detail != "尚未激活" and not messagebox.askyesno(
-                "授权校验未通过", f"{license_detail}\n\n是否重新输入兑换信息？"
-            ):
-                log("授权校验未通过，下载未启动。")
-                return
-            order_id = simpledialog.askstring(
-                "激活下载器", "请输入闲鱼订单号（订单号同时作为兑换码）：", parent=app
-            )
-            if not order_id:
-                log("已取消授权输入，下载未启动。")
-                return
-            authorized, license_detail = license_client.activate(order_id)
-            if not authorized:
-                messagebox.showerror("授权失败", license_detail)
-                log(f"授权失败：{license_detail}")
-                return
-            messagebox.showinfo("授权成功", "本机已绑定此订单授权，可以开始下载。")
-            log("授权成功，本机已绑定闲鱼订单。")
+            def check_license_worker() -> None:
+                result = _authorize_download_client()
+
+                def finish_license_check() -> None:
+                    nonlocal license_check_running
+                    license_check_running = False
+                    start_btn.configure(text="开始下载")
+                    authorized, license_detail = result
+                    if not authorized:
+                        network_error = any(
+                            marker in license_detail
+                            for marker in (
+                                "无法连接授权服务器",
+                                "连接授权服务器超时",
+                                "DNS解析失败",
+                                "TLS证书校验失败",
+                                "授权服务器暂时不可用",
+                                "授权校验发生错误",
+                            )
+                        )
+                        if network_error:
+                            messagebox.showerror("授权服务器不可用", license_detail)
+                            log(f"授权校验失败：{license_detail}，下载未启动。")
+                            refresh_action_states()
+                            return
+                        if license_detail != "尚未激活" and not messagebox.askyesno(
+                            "授权校验未通过",
+                            f"{license_detail}\n\n是否重新输入兑换信息？",
+                        ):
+                            log("授权校验未通过，下载未启动。")
+                            refresh_action_states()
+                            return
+                        order_id = simpledialog.askstring(
+                            "激活下载器",
+                            "请输入闲鱼订单号（订单号同时作为兑换码）：",
+                            parent=app,
+                        )
+                        if not order_id:
+                            log("已取消授权输入，下载未启动。")
+                            refresh_action_states()
+                            return
+                        import license_client
+
+                        authorized, license_detail = license_client.activate(order_id)
+                        if not authorized:
+                            messagebox.showerror("授权失败", license_detail)
+                            log(f"授权失败：{license_detail}")
+                            refresh_action_states()
+                            return
+                        messagebox.showinfo(
+                            "授权成功", "本机已绑定此订单授权，可以开始下载。"
+                        )
+                        log("授权成功，本机已绑定闲鱼订单。")
+                    else:
+                        log(f"下载授权校验通过：{license_detail}")
+                    start_download(
+                        session_checked=session_checked,
+                        license_checked=True,
+                    )
+
+                schedule_ui(finish_license_check)
+
+            threading.Thread(
+                target=check_license_worker,
+                name="license-check",
+                daemon=True,
+            ).start()
+            return
 
         session_status = validate_dingtalk_session(COOKIES_FILE)
         public_shares_only = all(task.kind in {KIND_LIVE_SHARE, KIND_ALIDOCS} for task in selected_tasks)
@@ -3129,7 +3194,7 @@ def build_gui():
                     session_check_running = False
                     if result[0] == "accepted":
                         log("钉钉已接受当前登录会话，开始下载。")
-                        start_download(session_checked=True)
+                        start_download(session_checked=True, license_checked=True)
                         return
                     if result[0] == "authentication":
                         log(f"钉钉拒绝当前登录会话：{result[1]}")
@@ -3171,14 +3236,39 @@ def build_gui():
             video_var.set("2")
 
         save_dir = Path(save_var.get().strip() or str(DEFAULT_SAVE))
-        save_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            settings = load_settings(COLLECTOR_SETTINGS)
+            configured_browser = settings.get("login_browser_path")
+            download_browser = find_login_browser(
+                configured_browser if isinstance(configured_browser, str) else None
+            )
+        except OSError as exc:
+            detail = _collection_io_error_message(exc, "准备下载目录")
+            log(f"下载未启动：{detail}")
+            messagebox.showerror("无法开始下载", detail)
+            refresh_action_states()
+            return
 
-        settings = load_settings(COLLECTOR_SETTINGS)
-        configured_browser = settings.get("login_browser_path")
-        download_browser = find_login_browser(
-            configured_browser if isinstance(configured_browser, str) else None
+        prepared_worker = DownloadWorker(
+            godingtalk=exe_path,
+            mediago=mediago_path,
+            ffmpeg=ffmpeg_path,
+            # Pass the complete parsed list; the worker filters unchecked
+            # rows while retaining their original indices for GUI updates.
+            tasks=list(state.tasks),
+            save_dir=save_dir,
+            cookies=COOKIES_FILE,
+            thread_count=threads,
+            event_q=event_q,
+            stop_event=stop_event,
+            video_workers=video_workers,
+            config_file=CONFIG_FILE,
+            login_browser_path=(download_browser.executable if download_browser else None),
+            prefix_index=prefix_index_var.get(),
+            prefix_date=prefix_date_var.get(),
+            replay_metadata=settings,
         )
-
         state.tasks = tasks
         state.running = True
         state.stop_flag = False
@@ -3197,26 +3287,17 @@ def build_gui():
             f"开始下载 {len(selected_tasks)} / {len(tasks)} 个已选任务 → {save_dir}"
         )
 
-        worker = DownloadWorker(
-            godingtalk=exe_path,
-            mediago=mediago_path,
-            ffmpeg=ffmpeg_path,
-            # Pass the complete parsed list; the worker filters unchecked
-            # rows while retaining their original indices for GUI updates.
-            tasks=list(state.tasks),
-            save_dir=save_dir,
-            cookies=COOKIES_FILE,
-            thread_count=threads,
-            event_q=event_q,
-            stop_event=stop_event,
-            video_workers=video_workers,
-            config_file=CONFIG_FILE,
-            login_browser_path=(download_browser.executable if download_browser else None),
-            prefix_index=prefix_index_var.get(),
-            prefix_date=prefix_date_var.get(),
-            replay_metadata=load_settings(COLLECTOR_SETTINGS),
-        )
-        worker.start()
+        worker = prepared_worker
+        try:
+            worker.start()
+        except (OSError, RuntimeError):
+            worker = None
+            state.running = False
+            refresh_action_states()
+            log("下载未启动：无法创建后台下载任务。")
+            messagebox.showerror(
+                "无法开始下载", "无法创建后台下载任务，请关闭软件后重试。"
+            )
 
     def stop_download():
         if not state.running:
@@ -3284,6 +3365,17 @@ def build_gui():
         watch_stop()
 
     def poll_events():
+        def run_ui_callback(callback) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                log(f"启动下载流程时发生错误（{type(exc).__name__}），请重试。")
+                messagebox.showerror(
+                    "无法开始下载",
+                    "程序处理下载启动流程时发生错误，请检查保存目录后重试。",
+                )
+                refresh_action_states()
+
         try:
             while True:
                 ev = event_q.get_nowait()
@@ -3329,10 +3421,12 @@ def build_gui():
                         if delay:
                             app.after(
                                 delay,
-                                lambda fn=callback: fn() if not closing else None,
+                                lambda fn=callback: (
+                                    run_ui_callback(fn) if not closing else None
+                                ),
                             )
                         else:
-                            callback()
+                            run_ui_callback(callback)
                 elif kind == "finished":
                     settings = load_settings(COLLECTOR_SETTINGS)
                     _remember_replay_metadata(
