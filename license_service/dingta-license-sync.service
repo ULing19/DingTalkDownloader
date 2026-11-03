@@ -1,5 +1,5 @@
 [Unit]
-Description=Sync paid DingTalk downloader orders from Xianyu backend
+Description=Sync paid downloader orders from product-allowlisted Xianyu items
 After=network-online.target dingta-license.service
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=dingta-license
 Group=dingta-license
 WorkingDirectory=/opt/dingta-license
 EnvironmentFile=/etc/dingta-license.env
-ExecStart=/opt/dingta-license/venv/bin/python -c "from app import _sync_xianyu_orders; print(_sync_xianyu_orders())"
+ExecStart=/opt/dingta-license/venv/bin/python -c "from app import sync_configured_products; print(sync_configured_products())"
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

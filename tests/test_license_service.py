@@ -70,6 +70,93 @@ def test_binding_is_idempotent_and_caps_two_devices_per_order(client):
     assert client.post("/v1/check", json=third).status_code == 403
 
 
+def test_legacy_request_without_product_remains_dingtalk_compatible(client):
+    order = "DINGTALK-OLD-1234"
+    assert create(client, order=order).status_code == 200
+    request = {"order_id": order, "code": order, "device_id": "d" * 64}
+    assert client.post("/v1/activate", json=request).status_code == 200
+    assert client.post("/v1/check", json=request).json()["authorized"] is True
+
+
+def test_same_original_order_can_bind_independently_per_product(client):
+    order = "SAME-ORDER-123456"
+    ding = create(client, order=order)
+    ql = client.post("/admin/licenses", headers=admin(client), json={
+        "order_id": order, "code": order, "product": "qlchat",
+    })
+    assert ding.status_code == ql.status_code == 200
+    ding_order = ding.json()["code"]
+    ql_order = ql.json()["code"]
+    assert ding_order == order
+    assert ql_order == order or ql_order == "QLCHAT-" + order
+    ding_base = {"order_id": ding_order, "code": ding_order, "product": "dingtalk"}
+    ql_base = {"order_id": order, "code": order, "product": "qlchat"}
+    for product, base, letter in [("dingtalk", ding_base, "a"), ("qlchat", ql_base, "b")]:
+        for suffix in range(2):
+            payload = {**base, "device_id": (letter + str(suffix)) * 32}
+            assert client.post("/v1/activate", json=payload).status_code == 200
+            assert client.post("/v1/check", json=payload).json()["authorized"] is True
+    assert client.post("/v1/activate", json={**ql_base, "device_id": "c" * 64}).status_code == 409
+    assert client.post("/v1/activate", json={**ding_base, "device_id": "c" * 64}).status_code == 409
+    wrong_product = {**ql_base, "device_id": "b0" * 32, "product": "dingtalk"}
+    assert client.post("/v1/check", json=wrong_product).status_code == 403
+
+
+def test_qlchat_prefix_client_compatibility_and_raw_order_code(client):
+    raw = "0123456789012345"
+    assert client.post("/admin/licenses", headers=admin(client), json={
+        "product": "qlchat", "order_id": raw, "code": raw,
+    }).status_code == 200
+    raw_request = {"product": "qlchat", "order_id": raw, "code": raw, "device_id": "a" * 64}
+    assert client.post("/v1/activate", json=raw_request).status_code == 200
+    assert client.post("/v1/check", json=raw_request).status_code == 200
+    prefixed = "QLCHAT-" + raw
+    old_request = {"product": "qlchat", "order_id": prefixed, "code": prefixed, "device_id": "a" * 64}
+    assert client.post("/v1/check", json=old_request).status_code == 200
+    listed = client.get("/admin/licenses?product=qlchat", headers=admin(client)).json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["product"] == "qlchat"
+    assert listed["items"][0]["product_name"] == "千聊下载器"
+    assert listed["items"][0]["order_id"] == raw
+
+
+def test_pre_product_schema_migration_preserves_dingtalk_license_and_device(client):
+    raw_db = service.DB_PATH
+    raw_db.parent.mkdir(parents=True, exist_ok=True)
+    now = 2_000_000_000
+    order = "LEGACY-DB-ORDER-1234"
+    order_hash = service._digest(order, b"order-id\0")
+    with __import__("sqlite3").connect(raw_db) as db:
+        db.executescript("""
+        CREATE TABLE licenses(
+          id TEXT PRIMARY KEY, order_hash TEXT NOT NULL, order_mask TEXT NOT NULL,
+          code_hash TEXT NOT NULL UNIQUE, expires_at INTEGER,
+          revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE UNIQUE INDEX license_one_per_order_idx ON licenses(order_hash);
+        CREATE TABLE devices(order_hash TEXT NOT NULL, device_id TEXT NOT NULL,
+          first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(order_hash,device_id));
+        CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT,event TEXT NOT NULL,license_id TEXT,device_hint TEXT,created_at INTEGER NOT NULL);
+        """)
+        db.execute("INSERT INTO licenses VALUES(?,?,?,?,?,?,?,?)", (
+            "legacy-license", order_hash, service._mask(order), service._code_hash(order), None, 0, now, now,
+        ))
+        db.execute("INSERT INTO devices VALUES(?,?,?,?)", (order_hash, "f" * 64, now, now))
+    with service._db() as db:
+        row = db.execute("SELECT id,product FROM licenses").fetchone()
+        assert (row["id"], row["product"]) == ("legacy-license", "dingtalk")
+        assert db.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 1
+    request = {"order_id": order, "code": order, "device_id": "f" * 64}
+    assert client.post("/v1/check", json=request).status_code == 200
+
+
+def test_update_cannot_move_existing_license_between_products(client):
+    created = create(client, order="UPDATE-KEEP-PRODUCT-1234").json()
+    result = client.patch(f"/admin/licenses/{created['id']}", headers=admin(client), json={"product": "qlchat"})
+    assert result.status_code == 400
+    item = client.get("/admin/licenses?product=dingtalk", headers=admin(client)).json()["items"][0]
+    assert item["product"] == "dingtalk"
+
+
 def test_client_rechecks_existing_cached_authorization_against_strict_api(client, monkeypatch):
     import time
     import license_client
@@ -105,22 +192,22 @@ def test_activation_refreshes_newly_delivered_order_once(client, monkeypatch):
     service_module.DB_PATH.unlink()
     calls = []
     original = service_module._sync_xianyu_orders
-    def restore_order():
-        calls.append(True)
+    def restore_order(product="dingtalk"):
+        calls.append(product)
         service_module.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         # Recreate schema and the same test license through the public admin API.
         with service_module._db() as db:
             order_hash = service_module._digest("TEST123456789", b"order-id\0")
-            db.execute("INSERT INTO licenses VALUES(?,?,?,?,?,?,?,?,?)", (
+            db.execute("INSERT INTO licenses(id,order_hash,order_mask,order_ciphertext,code_hash,expires_at,revoked,created_at,updated_at,product) VALUES(?,?,?,?,?,?,?,?,?,?)", (
                 "test-id", order_hash, service_module._mask("TEST123456789"),
                 service_module._encrypt_order("TEST123456789"),
                 service_module._digest("TEST123456789", b"license-code\0"),
-                None, 0, int(time.time()), int(time.time())))
+                None, 0, int(time.time()), int(time.time()), "dingtalk"))
     monkeypatch.setattr(service_module, "_sync_xianyu_orders", restore_order)
     payload = {"order_id": "TEST123456789", "code": "TEST123456789", "device_id": "a" * 64}
     result = client.post("/v1/activate", json=payload)
     assert result.status_code == 200, result.text
-    assert calls == [True]
+    assert calls == ["dingtalk"]
 
 
 def test_order_number_repairs_stale_imported_code_digest(client):
@@ -302,6 +389,77 @@ def test_sync_repairs_rows_and_imports_new_orders(client, monkeypatch):
     assert service._sync_xianyu_orders() == {"source_count": 4, "excluded_status_count": 5, "created": 3, "repaired": 1, "skipped": 0}
     included = {r["order_id"] for r in client.get("/admin/licenses", headers=admin(client)).json()["items"]}
     assert included == {"TEST123456789", "TEST-NEW-123456", "TEST-PENDING-1234", "TEST-PAID-1234"}
+
+
+def test_product_specific_sync_uses_only_its_allowlist_and_namespaces_orders(client, monkeypatch):
+    from types import SimpleNamespace
+    seen = []
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, query, params): seen.append(tuple(params))
+        def fetchall(self): return [("SAME-ORDER-123456", "paid")]
+    class Connection:
+        def cursor(self): return Cursor()
+        def close(self): pass
+    monkeypatch.setitem(sys.modules, "pymysql", SimpleNamespace(connect=lambda **kw: Connection(), cursors=SimpleNamespace(Cursor=Cursor)))
+    monkeypatch.setattr(service, "XIANYU_ITEM_IDS", ("dingtalk-item",))
+    monkeypatch.setattr(service, "QLCHAT_XIANYU_ITEM_IDS", ("qlchat-item",))
+    monkeypatch.setattr(service, "XIANYU_DB_USER", "test")
+    monkeypatch.setattr(service, "XIANYU_DB_PASSWORD", "test")
+    result = service.sync_configured_products()
+    assert seen == [("dingtalk-item",), ("qlchat-item",)]
+    assert result["dingtalk"]["created"] == 1
+    assert result["qlchat"]["created"] == 1
+    assert client.get("/admin/licenses?product=dingtalk", headers=admin(client)).json()["items"][0]["order_id"] == "SAME-ORDER-123456"
+    ql_item = client.get("/admin/licenses?product=qlchat", headers=admin(client)).json()["items"][0]
+    assert ql_item["order_id"] == "SAME-ORDER-123456"
+    assert ql_item["product_name"] == "千聊下载器"
+
+
+def test_configured_sync_skips_products_without_explicit_item_allowlist(monkeypatch):
+    calls = []
+    monkeypatch.setattr(service, "XIANYU_ITEM_IDS", ("dingtalk-item",))
+    monkeypatch.setattr(service, "QLCHAT_XIANYU_ITEM_IDS", ())
+    monkeypatch.setattr(service, "_sync_xianyu_orders", lambda product="dingtalk": calls.append(product) or {"created": 0})
+    assert service.sync_configured_products() == {"dingtalk": {"created": 0}}
+    assert calls == ["dingtalk"]
+
+
+def test_overlapping_product_item_allowlists_are_rejected_before_database_access(monkeypatch):
+    monkeypatch.setattr(service, "XIANYU_ITEM_IDS", ("shared-item",))
+    monkeypatch.setattr(service, "QLCHAT_XIANYU_ITEM_IDS", ("shared-item",))
+    monkeypatch.setattr(service, "XIANYU_DB_USER", "test")
+    monkeypatch.setattr(service, "XIANYU_DB_PASSWORD", "test")
+    with pytest.raises(RuntimeError, match="商品 ID 不能重叠"):
+        service._sync_xianyu_orders("qlchat")
+
+
+def test_configured_sync_continues_with_qlchat_when_dingtalk_sync_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(service, "XIANYU_ITEM_IDS", ("dingtalk-item",))
+    monkeypatch.setattr(service, "QLCHAT_XIANYU_ITEM_IDS", ("qlchat-item",))
+    def sync(product="dingtalk"):
+        calls.append(product)
+        if product == "dingtalk": raise RuntimeError("database unavailable")
+        return {"source_count": 7, "created": 2}
+    monkeypatch.setattr(service, "_sync_xianyu_orders", sync)
+    assert service.sync_configured_products() == {
+        "dingtalk": {"error": "订单同步失败，请检查商品配置和后台连接"},
+        "qlchat": {"source_count": 7, "created": 2},
+    }
+    assert calls == ["dingtalk", "qlchat"]
+
+
+def test_admin_page_labels_product_filter_and_qlchat_item_link(client):
+    html = client.get("/admin").text
+    assert 'id="product-filter"' in html
+    assert 'id="create-product"' in html
+    assert "所属软件" in html
+    assert "钉钉下载器" in html
+    assert "千聊下载器" in html
+    assert "1093753190581" in html
+    assert "https://www.goofish.com/item?id=1093753190581" in html
 
 
 def test_admin_has_no_custom_code_field(client):
